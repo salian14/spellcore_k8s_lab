@@ -3,15 +3,15 @@
 # of truth for addresses on the Ansible side; the NODES array in
 # ../Vagrantfile wins for node addresses if the two ever disagree.
 # The full map -- which network is which, and why only one of them is safe to
-# use -- is in ../lab-network.md.
+# use -- is in ../README.md under "Networking".
 
 # The host's address on the lab network (virbr2), reachable from every node.
 lab_host_ip: "192.168.56.1"
 
-# The local OCI registry the cluster pulls from. Nodes cannot resolve any name
-# their own /etc/hosts doesn't carry (hostmanager runs with
-# manage_guest = false), so containerd_registry_trust writes this name into
-# /etc/hosts on each node.
+# The local OCI registry the cluster pulls from. hostmanager syncs the node
+# names into each guest's /etc/hosts, but it only knows about machines defined
+# in the Vagrantfile and this name points at the host -- so
+# containerd_registry_trust writes it into /etc/hosts on each node itself.
 #
 # Use the name, not localhost: it resolves to the same address on the host and
 # on the nodes, so a tag baked into an image stays valid in both places.

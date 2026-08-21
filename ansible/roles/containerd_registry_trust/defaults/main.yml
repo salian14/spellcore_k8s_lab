@@ -18,9 +18,11 @@ containerd_registry_trust_capabilities:
 containerd_registry_trust_skip_verify: false
 
 # --- name resolution on the node ---
-# vagrant-hostmanager runs with manage_guest = false, so a guest's /etc/hosts
-# knows nothing but itself -- no other node, no workstation, no registry.lab.
-# Any name a node needs has to be written here. See ../lab-network.md.
+# vagrant-hostmanager runs with manage_guest = true, so a guest's /etc/hosts
+# carries every node's name -- but only those. hostmanager maps names to
+# machines defined in the Vagrantfile, and registry.lab points at the host, so
+# it can't provide this one. Written here instead. See ../README.md,
+# "Networking".
 containerd_registry_trust_manage_hosts_entry: true
 containerd_registry_trust_hosts_file: /etc/hosts
 

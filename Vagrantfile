@@ -1,9 +1,11 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 #
-# Three bare Ubuntu VMs, networked and named for building a k8s test cluster
-# on top of (one intended control-plane node, two intended workers). No k8s
-# software is installed here — bring your own bootstrap (kubeadm, k3s, etc.).
+# Three Ubuntu VMs -- one control-plane node, two workers -- and the four
+# Ansible playbooks that turn them into a working Kubernetes lab: node
+# prerequisites, lab-registry trust, cluster bootstrap (kubeadm + Calico +
+# metrics-server + a workstation kubeconfig context), and an observability
+# backend. See README.md for the VM and role inventory.
 
 BOX            = "generic/ubuntu2204"
 NETWORK_PREFIX = "192.168.56"
@@ -116,10 +118,10 @@ Vagrant.configure("2") do |config|
         end
 
         # Teach containerd to resolve and pull from registry.lab:5000 on the
-        # host (see lab-network.md). Runs before the cluster bootstrap so the
-        # nodes can pull local images from the moment they're Ready. Guests
-        # only -- whatever serves that endpoint on 192.168.56.1 is run
-        # separately, and this warns rather than fails when it isn't up.
+        # host (see README.md, "Networking"). Runs before the cluster
+        # bootstrap so the nodes can pull local images from the moment they're
+        # Ready. Guests only -- whatever serves that endpoint on 192.168.56.1
+        # is run separately, and this warns rather than fails when it isn't up.
         m.vm.provision "ansible" do |ansible|
           ansible.compatibility_mode = "2.0"
           ansible.playbook = "ansible/k8s-registry-trust.yml"

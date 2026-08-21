@@ -19,6 +19,12 @@ Plus `containerd_registry_trust`, which lets the nodes pull from the lab
 registry at `registry.lab:5000` — also invoked by Vagrant, see
 [its section](#containerd_registry_trust-role) below.
 
+Finally the `k8s_node_storage_expand` / `helm_cli` / `k8s_local_path_storage` /
+`k8s_observability` roles, which grow the node root volumes, install Helm and a
+default StorageClass, and deploy the Grafana/Tempo/Loki/Prometheus/MinIO/OTel
+telemetry backend — see [Observability roles](#observability-roles). Vagrant
+invokes these too.
+
 ## Layout
 
 ```
@@ -29,10 +35,12 @@ registry at `registry.lab:5000` — also invoked by Vagrant, see
     ├── k8s-node-prereqs.yml     # entry point for the k8s_node_prereqs role, invoked by Vagrant's ansible provisioner
     ├── k8s-cluster-bootstrap.yml  # entry point for the five cluster-bootstrap roles below, invoked by Vagrant's ansible provisioner
     ├── k8s-registry-trust.yml   # entry point for containerd_registry_trust, invoked by Vagrant's ansible provisioner
+    ├── k8s-observability.yml    # entry point for the four observability roles below, invoked by Vagrant's ansible provisioner
     ├── group_vars/
     │   └── all.yml              # lab network/registry addresses shared by every play
     ├── host_vars/
-    │   └── localhost.yml.example  # copy to localhost.yml to override defaults locally
+    │   ├── localhost.yml.example    # copy to localhost.yml to override the vagrant role's defaults
+    │   └── k8s-control.yml.example  # copy to k8s-control.yml to override observability credentials/ports/retention
     └── roles/
         ├── vagrant/
         │   ├── defaults/main.yml   # all configurable variables
@@ -69,13 +77,34 @@ registry at `registry.lab:5000` — also invoked by Vagrant, see
         │   ├── defaults/main.yml   # all configurable variables
         │   ├── meta/main.yml
         │   └── tasks/main.yml
-        └── containerd_registry_trust/
+        ├── containerd_registry_trust/
+        │   ├── defaults/main.yml   # all configurable variables
+        │   ├── meta/main.yml
+        │   ├── handlers/main.yml
+        │   ├── tasks/main.yml
+        │   └── templates/
+        │       └── hosts.toml.j2   # certs.d entry for the lab registry
+        ├── k8s_node_storage_expand/
+        │   ├── defaults/main.yml   # all configurable variables
+        │   ├── meta/main.yml
+        │   └── tasks/main.yml
+        ├── helm_cli/
+        │   ├── defaults/main.yml   # all configurable variables
+        │   ├── meta/main.yml
+        │   └── tasks/main.yml
+        ├── k8s_local_path_storage/
+        │   ├── defaults/main.yml   # all configurable variables
+        │   ├── meta/main.yml
+        │   └── tasks/main.yml
+        └── k8s_observability/
             ├── defaults/main.yml   # all configurable variables
             ├── meta/main.yml
-            ├── handlers/main.yml
-            ├── tasks/main.yml
-            └── templates/
-                └── hosts.toml.j2   # certs.d entry for the lab registry
+            ├── files/
+            │   └── dashboards/     # the seven bundled dashboard JSON files
+            ├── tasks/
+            │   ├── main.yml
+            │   └── dashboards.yml  # renders each dashboard as a labelled ConfigMap
+            └── templates/          # one values file per Helm release, plus the ConfigMap template
 ```
 
 `group_vars/all.yml` sits next to the playbooks, so every play here picks it
@@ -83,7 +112,7 @@ up — including the ones Vagrant runs against its own generated inventory. It
 holds the lab addresses (`lab_host_ip`, `lab_registry_host`,
 `lab_registry_port`, …) that `containerd_registry_trust` defaults to, so the
 endpoint is stated once rather than in the role. The full network map is in
-[`../lab-network.md`](../lab-network.md).
+[the README's Networking section](../README.md#networking).
 
 ## Requirements
 
@@ -247,9 +276,9 @@ virsh pool-list --all
 ## `k8s_node_prereqs` role
 
 Prepares the three `spellcore_k8s_lab` guest VMs (`k8s-control`, `k8s-worker1`,
-`k8s-worker2`) for `kubeadm`. `kubeadm init`/`kubeadm join` themselves stay
-manual — this role only gets the nodes to the point where those commands
-will work.
+`k8s-worker2`) for `kubeadm`. This role only gets the nodes to the point where
+`kubeadm init`/`kubeadm join` will work; running those is the job of the
+[cluster bootstrap roles](#cluster-bootstrap-roles) in the next playbook.
 
 No Ansible collections are required here either — only `ansible-core`
 modules: `apt`, `apt_repository`, `get_url`, `command`, `file`, `template`,
@@ -580,7 +609,7 @@ client key never reaches Ansible's output.
 
 Configures the nodes to pull from the lab registry at `registry.lab:5000`
 (→ `192.168.56.1`, plain HTTP, no auth — see
-[`../lab-network.md`](../lab-network.md)). **Node side
+[the README's Networking section](../README.md#networking)). **Node side
 only:** it doesn't install or run a registry, it makes the cluster able to use
 the one on the host.
 
@@ -589,9 +618,10 @@ between `k8s-node-prereqs.yml` and `k8s-cluster-bootstrap.yml`, so the trust is
 in place before the cluster comes up. Three things have to line up before a
 kubelet can pull `registry.lab:5000/...`, and the role does one each:
 
-1. **The name has to resolve.** A node's `/etc/hosts` contains only itself —
-   `spellcore_k8s_lab` runs hostmanager with `manage_guest = false`, so guests
-   learn nothing about the host or each other. The role writes
+1. **The name has to resolve.** hostmanager runs with `manage_guest = true`, so
+   a node's `/etc/hosts` carries every *node* name — but that is all it can
+   provide: it maps names to machines defined in the `Vagrantfile`, and
+   `registry.lab` points at the host. The role writes
    `192.168.56.1 registry.lab` itself.
 2. **containerd has to read `certs.d`.** `containerd.io` ships its own
    `config.toml` with every plugin setting commented out, so
