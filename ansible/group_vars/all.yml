@@ -1,0 +1,23 @@
+---
+# Lab network facts shared by every play in this repo. This file is the source
+# of truth for addresses on the Ansible side; the NODES array in
+# ../Vagrantfile wins for node addresses if the two ever disagree.
+# The full map -- which network is which, and why only one of them is safe to
+# use -- is in ../lab-network.md.
+
+# The host's address on the lab network (virbr2), reachable from every node.
+lab_host_ip: "192.168.56.1"
+
+# The local OCI registry the cluster pulls from. Nodes cannot resolve any name
+# their own /etc/hosts doesn't carry (hostmanager runs with
+# manage_guest = false), so containerd_registry_trust writes this name into
+# /etc/hosts on each node.
+#
+# Use the name, not localhost: it resolves to the same address on the host and
+# on the nodes, so a tag baked into an image stays valid in both places.
+lab_registry_host: "registry.lab"
+lab_registry_port: 5000
+lab_registry_endpoint: "{{ lab_registry_host }}:{{ lab_registry_port }}"
+# Plain HTTP, no auth -- a lab registry on an isolated bridge.
+lab_registry_scheme: "http"
+lab_registry_url: "{{ lab_registry_scheme }}://{{ lab_registry_endpoint }}"

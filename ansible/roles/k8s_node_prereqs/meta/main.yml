@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: k8s_node_prereqs
+  description: >-
+    Configure Kubernetes node prerequisites (swap off, kernel modules, sysctl,
+    containerd, kubeadm/kubelet/kubectl) on Ubuntu guest VMs
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

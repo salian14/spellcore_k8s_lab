@@ -1,0 +1,6 @@
+---
+- name: Install Vagrant and the vagrant-libvirt provider
+  hosts: vagrant_hosts
+  become: true
+  roles:
+    - vagrant

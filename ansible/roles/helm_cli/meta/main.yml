@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: helm_cli
+  description: >-
+    Install a pinned, checksum-verified helm binary so other roles can install
+    Helm charts into the cluster
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

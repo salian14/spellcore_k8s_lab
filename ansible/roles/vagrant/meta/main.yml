@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: vagrant
+  description: Install Vagrant (HashiCorp apt repo) with optional vagrant-libvirt provider
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

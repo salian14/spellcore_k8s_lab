@@ -1,0 +1,327 @@
+---
+- name: Wait for the Kubernetes API server to become responsive
+  ansible.builtin.command: "kubectl --kubeconfig={{ k8s_observability_kubeconfig }} get nodes"
+  register: k8s_observability_api_check
+  until: k8s_observability_api_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Check for the observability namespace
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_observability_kubeconfig }}
+    get namespace {{ k8s_observability_namespace }}
+  register: k8s_observability_namespace_check
+  changed_when: false
+  failed_when: false
+
+- name: Create the observability namespace
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_observability_kubeconfig }}
+    create namespace {{ k8s_observability_namespace }}
+  when: k8s_observability_namespace_check.rc != 0
+
+# --- helm repositories ---
+
+# `helm repo list` exits non-zero when no repositories are configured at all,
+# hence failed_when: false and the default('[]') below.
+- name: List the configured helm repositories
+  ansible.builtin.command: "{{ k8s_observability_helm_binary }} repo list -o json"
+  register: k8s_observability_repo_list
+  changed_when: false
+  failed_when: false
+
+- name: Add the missing helm repositories
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} repo add {{ item.name }} {{ item.url }}
+  loop: "{{ k8s_observability_helm_repos }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: >-
+    item.name not in (k8s_observability_repo_list.stdout | default('[]', true)
+                      | from_json | map(attribute='name') | list)
+
+- name: Refresh the helm repository indexes
+  ansible.builtin.command: "{{ k8s_observability_helm_binary }} repo update"
+  changed_when: false
+
+# --- rendered values files ---
+
+# 0700 because the rendered files below carry the MinIO and Grafana credentials.
+# This is a deliberate departure from the copy-to-/tmp convention used by
+# k8s_kubeconfig_cni, whose manifest has no secrets in it.
+- name: Ensure the values directory exists
+  ansible.builtin.file:
+    path: "{{ k8s_observability_values_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# Registered because the .changed of each of these is half of the idempotence
+# gate on the corresponding helm release below.
+- name: Render the MinIO values file
+  ansible.builtin.template:
+    src: minio-values.yaml.j2
+    dest: "{{ k8s_observability_values_dir }}/minio-values.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: k8s_observability_minio_values
+  no_log: true
+
+# No no_log here, unlike its neighbours: this file is the only one of the six
+# with no credentials in it, so hiding the diff would cost more than it buys.
+# Same reasoning as the collector's task below.
+- name: Render the Prometheus values file
+  ansible.builtin.template:
+    src: prometheus-values.yaml.j2
+    dest: "{{ k8s_observability_values_dir }}/prometheus-values.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: k8s_observability_prometheus_values
+
+- name: Render the Tempo values file
+  ansible.builtin.template:
+    src: tempo-values.yaml.j2
+    dest: "{{ k8s_observability_values_dir }}/tempo-values.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: k8s_observability_tempo_values
+  no_log: true
+
+- name: Render the Loki values file
+  ansible.builtin.template:
+    src: loki-values.yaml.j2
+    dest: "{{ k8s_observability_values_dir }}/loki-values.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: k8s_observability_loki_values
+  no_log: true
+
+- name: Render the OpenTelemetry collector values file
+  ansible.builtin.template:
+    src: otel-collector-values.yaml.j2
+    dest: "{{ k8s_observability_values_dir }}/otel-collector-values.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: k8s_observability_otel_values
+
+- name: Render the Grafana values file
+  ansible.builtin.template:
+    src: grafana-values.yaml.j2
+    dest: "{{ k8s_observability_values_dir }}/grafana-values.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: k8s_observability_grafana_values
+  no_log: true
+
+# --- releases, in dependency order ---
+#
+# Each release follows the same two-task shape: a `helm status` guard, then an
+# `upgrade --install` gated on "release absent OR rendered values changed".
+#
+# That gate is not decoration. `helm upgrade --install` always exits 0, always
+# prints the same output, and Helm 3 mints a NEW REVISION on every invocation --
+# so neither rc nor revision number can distinguish real work from a no-op, and
+# without the gate this role would report `changed` on every single
+# `vagrant provision` and push a pointless revision each time.
+#
+# Credentials are passed only through the rendered values files, never via
+# `--set`, which would expose them in ps output and in Ansible's task log.
+#
+# --wait makes each release block until its workloads are Ready, which is also
+# what orders MinIO's buckets (created by a Helm hook Job) ahead of Tempo and
+# Loki needing them.
+
+- name: Check for an existing MinIO release
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} status minio
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+  register: k8s_observability_minio_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade MinIO
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} upgrade --install minio
+    {{ k8s_observability_minio_chart }}
+    --version {{ k8s_observability_minio_chart_version }}
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+    --values {{ k8s_observability_values_dir }}/minio-values.yaml
+    --wait --timeout {{ k8s_observability_helm_timeout }}
+  register: k8s_observability_minio_install
+  changed_when: k8s_observability_minio_install.rc == 0
+  when: >-
+    k8s_observability_minio_status.rc != 0
+    or k8s_observability_minio_values.changed
+
+# Before Tempo, because Tempo's metrics-generator opens its remote_write
+# connection to prometheus-server as it starts, and before Grafana, whose
+# provisioned datasources name the Service. Neither hard-fails if Prometheus is
+# missing -- they just retry or render a broken datasource -- so this ordering
+# is about a clean first boot rather than correctness.
+- name: Check for an existing Prometheus release
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} status prometheus
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+  register: k8s_observability_prometheus_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade Prometheus
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} upgrade --install prometheus
+    {{ k8s_observability_prometheus_chart }}
+    --version {{ k8s_observability_prometheus_chart_version }}
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+    --values {{ k8s_observability_values_dir }}/prometheus-values.yaml
+    --wait --timeout {{ k8s_observability_helm_timeout }}
+  register: k8s_observability_prometheus_install
+  changed_when: k8s_observability_prometheus_install.rc == 0
+  when: >-
+    k8s_observability_prometheus_status.rc != 0
+    or k8s_observability_prometheus_values.changed
+
+- name: Check for an existing Tempo release
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} status tempo
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+  register: k8s_observability_tempo_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade Tempo
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} upgrade --install tempo
+    {{ k8s_observability_tempo_chart }}
+    --version {{ k8s_observability_tempo_chart_version }}
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+    --values {{ k8s_observability_values_dir }}/tempo-values.yaml
+    --wait --timeout {{ k8s_observability_helm_timeout }}
+  register: k8s_observability_tempo_install
+  changed_when: k8s_observability_tempo_install.rc == 0
+  when: >-
+    k8s_observability_tempo_status.rc != 0
+    or k8s_observability_tempo_values.changed
+
+- name: Check for an existing Loki release
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} status loki
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+  register: k8s_observability_loki_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade Loki
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} upgrade --install loki
+    {{ k8s_observability_loki_chart }}
+    --version {{ k8s_observability_loki_chart_version }}
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+    --values {{ k8s_observability_values_dir }}/loki-values.yaml
+    --wait --timeout {{ k8s_observability_helm_timeout }}
+  register: k8s_observability_loki_install
+  changed_when: k8s_observability_loki_install.rc == 0
+  when: >-
+    k8s_observability_loki_status.rc != 0
+    or k8s_observability_loki_values.changed
+
+# After the backends, so the collector isn't retrying against absent exporters
+# during its first few seconds.
+- name: Check for an existing OpenTelemetry collector release
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} status otel-collector
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+  register: k8s_observability_otel_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade the OpenTelemetry collector
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} upgrade --install otel-collector
+    {{ k8s_observability_otel_chart }}
+    --version {{ k8s_observability_otel_chart_version }}
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+    --values {{ k8s_observability_values_dir }}/otel-collector-values.yaml
+    --wait --timeout {{ k8s_observability_helm_timeout }}
+  register: k8s_observability_otel_install
+  changed_when: k8s_observability_otel_install.rc == 0
+  when: >-
+    k8s_observability_otel_status.rc != 0
+    or k8s_observability_otel_values.changed
+
+# Last, because its provisioned datasources name the Tempo and Loki Services.
+- name: Check for an existing Grafana release
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} status grafana
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+  register: k8s_observability_grafana_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade Grafana
+  ansible.builtin.command: >-
+    {{ k8s_observability_helm_binary }} upgrade --install grafana
+    {{ k8s_observability_grafana_chart }}
+    --version {{ k8s_observability_grafana_chart_version }}
+    --kubeconfig={{ k8s_observability_kubeconfig }}
+    --namespace {{ k8s_observability_namespace }}
+    --values {{ k8s_observability_values_dir }}/grafana-values.yaml
+    --wait --timeout {{ k8s_observability_helm_timeout }}
+  register: k8s_observability_grafana_install
+  changed_when: k8s_observability_grafana_install.rc == 0
+  when: >-
+    k8s_observability_grafana_status.rc != 0
+    or k8s_observability_grafana_values.changed
+
+# --- dashboards ---
+#
+# After Grafana, so the sidecar is already running and picks these up over its
+# WATCH. Applying them first would also work -- the sidecar LISTs on startup --
+# but this way a dashboard-only change doesn't depend on the release having
+# converged first.
+
+- name: Install the cluster dashboards
+  ansible.builtin.import_tasks: dashboards.yml
+
+# --- report ---
+
+- name: Read back the observability workloads
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_observability_kubeconfig }}
+    -n {{ k8s_observability_namespace }} get pods,pvc,svc
+  register: k8s_observability_workloads
+  changed_when: false
+
+- name: Report the observability stack endpoints
+  ansible.builtin.debug:
+    msg:
+      - "Grafana: {{ k8s_observability_grafana_url }}"
+      - "Prometheus: {{ k8s_observability_prometheus_url }}"
+      - "Grafana login: {{ k8s_observability_grafana_admin_user }} / {{ k8s_observability_grafana_admin_password }}"
+      - "OTLP ingest (gRPC): otel-collector.{{ k8s_observability_namespace }}.svc.cluster.local:4317"
+      - "OTLP ingest (HTTP): otel-collector.{{ k8s_observability_namespace }}.svc.cluster.local:4318"
+      - >-
+        Dashboards: {{ k8s_observability_dashboards | length }} provisioned via the
+        Grafana sidecar, which watches ALL namespaces for ConfigMaps labelled
+        {{ k8s_observability_grafana_sidecar_dashboards_label }} (folder from the
+        {{ k8s_observability_grafana_sidecar_folder_annotation }} annotation) and
+        {{ k8s_observability_grafana_sidecar_alerts_label }} for alert rules.
+      - "{{ k8s_observability_workloads.stdout_lines }}"

@@ -1,0 +1,44 @@
+---
+# --- the registry being trusted ---
+containerd_registry_trust_host: "{{ lab_registry_host }}"
+containerd_registry_trust_port: "{{ lab_registry_port }}"
+containerd_registry_trust_address: "{{ lab_host_ip }}"
+containerd_registry_trust_endpoint: "{{ lab_registry_endpoint }}"
+containerd_registry_trust_url: "{{ lab_registry_url }}"
+
+# What containerd is allowed to do against this host. "pull" and "resolve" are
+# what a kubelet needs; add "push" if you want to push from inside a node.
+containerd_registry_trust_capabilities:
+  - pull
+  - resolve
+
+# Only meaningful for an HTTPS registry with a certificate containerd doesn't
+# trust. The lab registry is plain HTTP, where the scheme in the host URL is
+# what does the work, so this stays off.
+containerd_registry_trust_skip_verify: false
+
+# --- name resolution on the node ---
+# vagrant-hostmanager runs with manage_guest = false, so a guest's /etc/hosts
+# knows nothing but itself -- no other node, no workstation, no registry.lab.
+# Any name a node needs has to be written here. See ../lab-network.md.
+containerd_registry_trust_manage_hosts_entry: true
+containerd_registry_trust_hosts_file: /etc/hosts
+
+# --- containerd ---
+containerd_registry_trust_config_path: /etc/containerd/config.toml
+containerd_registry_trust_certs_dir: /etc/containerd/certs.d
+
+# Plugin that owns the registry config in containerd 2.x. On containerd 1.x
+# this is "io.containerd.grpc.v1.cri" instead. Verify what your containerd
+# actually reads with:
+#   sudo containerd config dump | grep -B3 config_path
+containerd_registry_trust_cri_images_plugin: "io.containerd.cri.v1.images"
+
+# --- verification ---
+# Confirm from the node that the registry answers. Left as a warning by
+# default so that bringing the cluster up before the registry exists isn't a
+# hard failure; set _required to true to make an unreachable registry fail the
+# run.
+containerd_registry_trust_verify: true
+containerd_registry_trust_verify_timeout: 5
+containerd_registry_trust_required: false

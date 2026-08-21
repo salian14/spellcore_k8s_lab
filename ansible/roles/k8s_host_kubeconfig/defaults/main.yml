@@ -1,0 +1,41 @@
+---
+k8s_host_kubeconfig_enabled: true
+
+# Kubeconfig file on the workstation that the cluster/user/context entries are
+# written into. Defaults to the first entry of KUBECONFIG when that's set (so
+# the context lands in whatever file your shell already treats as active), and
+# to ~/.kube/config otherwise. Both lookups resolve on the machine running
+# ansible-playbook -- i.e. the workstation, not a guest VM.
+k8s_host_kubeconfig_path: >-
+  {{ (lookup('env', 'KUBECONFIG').split(':') | first)
+     | default(lookup('env', 'HOME') ~ '/.kube/config', true) }}
+
+# Names of the three entries this role owns. Deliberately fixed rather than
+# kubeadm's generic "kubernetes"/"kubernetes-admin": every run overwrites
+# exactly these three by name and touches nothing else, so unrelated clusters
+# sharing the same kubeconfig file survive untouched, while the previous run's
+# entries for *this* cluster are replaced rather than accumulated.
+k8s_host_kubeconfig_cluster_name: spellcore-k8s-lab
+k8s_host_kubeconfig_user_name: spellcore-k8s-lab-admin
+k8s_host_kubeconfig_context_name: spellcore-k8s-lab
+
+# Make the context current at the end of the run. This is the only setting
+# here that affects anything outside the role's own three entries.
+k8s_host_kubeconfig_set_current: true
+
+# API server URL as reached from the workstation. Empty means "use whatever
+# admin.conf already points at", which is k8s-control's private-network IP
+# (kubeadm writes --apiserver-advertise-address there, and puts it in the API
+# server cert's SANs). That address is directly routable from the host over
+# Vagrant's private network, so no tunnel or port-forward is involved. Set
+# this only if you front the API server with something else.
+k8s_host_kubeconfig_server: ""
+
+# One-time copy of the kubeconfig taken the first time this role modifies it,
+# written next to it as <path>.pre-spellcore-k8s-lab.bak. Not refreshed on
+# later runs -- it's a safety net for the first write, not a rolling backup.
+k8s_host_kubeconfig_backup: true
+
+# Confirm the workstation can actually reach the API server with the new
+# context before the run is declared successful.
+k8s_host_kubeconfig_verify: true

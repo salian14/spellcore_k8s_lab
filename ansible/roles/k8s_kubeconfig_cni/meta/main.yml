@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: k8s_kubeconfig_cni
+  description: >-
+    Configure kubectl on the Kubernetes control-plane node and install
+    Calico as the pod network CNI
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

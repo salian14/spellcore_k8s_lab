@@ -1,0 +1,4 @@
+# Vagrant's per-project machine state. Holds the per-machine SSH private keys
+# and the inventory Vagrant regenerates on every provision (with absolute host
+# paths baked in) -- none of it belongs in the repo.
+.vagrant/

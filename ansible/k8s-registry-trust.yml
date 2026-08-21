@@ -1,0 +1,18 @@
+---
+# Targets the cluster's node groups by name rather than `all` on purpose: this
+# playbook rewrites /etc/containerd/config.toml, and inventory.ini's only host
+# is the workstation. Naming the groups means an accidental
+# `-i inventory.ini` run is a no-op instead of an attempt to reconfigure your
+# own machine's containerd.
+#
+# Vagrant runs this automatically (see ../Vagrantfile). To re-run it
+# by hand against the running VMs:
+#
+#   ansible-playbook \
+#     -i .vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory \
+#     k8s-registry-trust.yml
+- name: Trust the lab registry on the Kubernetes nodes
+  hosts: k8s_control:k8s_workers
+  become: true
+  roles:
+    - containerd_registry_trust

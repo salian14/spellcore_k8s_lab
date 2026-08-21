@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: k8s_local_path_storage
+  description: >-
+    Install Rancher's local-path-provisioner and make it the cluster's default
+    StorageClass, so PersistentVolumeClaims can bind
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

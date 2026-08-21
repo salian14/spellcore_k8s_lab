@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: k8s_metrics_server
+  description: >-
+    Install the Kubernetes metrics-server so the metrics.k8s.io API is served,
+    making `kubectl top` and HorizontalPodAutoscaler resource metrics work
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

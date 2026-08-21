@@ -1,0 +1,18 @@
+---
+# --- kubeconfig ---
+k8s_kubeconfig_cni_user: "{{ ansible_user_id }}"
+
+# Users who get admin.conf staged as ~/.kube/config. Includes "vagrant"
+# unconditionally since play-level `become: true` makes ansible_user_id
+# resolve to the become user (root), not the vagrant user actually logging
+# into the VM.
+k8s_kubeconfig_cni_kube_config_users: "{{ [k8s_kubeconfig_cni_user, 'vagrant'] | unique }}"
+
+# --- Calico CNI (Tigera operator) ---
+k8s_kubeconfig_cni_calico_version: "v3.30.2"
+k8s_kubeconfig_cni_tigera_operator_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ k8s_kubeconfig_cni_calico_version }}/manifests/tigera-operator.yaml"
+k8s_kubeconfig_cni_custom_resources_remote_path: /tmp/calico-custom-resources.yaml
+
+# Wait for the control-plane node to reach Ready after CNI is applied.
+k8s_kubeconfig_cni_wait_for_ready: true
+k8s_kubeconfig_cni_wait_for_ready_timeout: 300

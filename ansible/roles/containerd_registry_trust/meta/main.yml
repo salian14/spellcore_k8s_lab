@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: containerd_registry_trust
+  description: >-
+    Teach containerd on the Kubernetes nodes to resolve and pull from the
+    lab's plain-HTTP OCI registry
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

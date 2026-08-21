@@ -1,0 +1,24 @@
+---
+# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+#
+# One ConfigMap per dashboard rather than one holding all seven: the object
+# limit is 1MiB and node-exporter-full.json alone is ~460KB, so a combined
+# ConfigMap would be one dashboard away from being unappliable.
+#
+# The label is what the Grafana sidecar watches for; the annotation is the
+# Grafana folder the dashboard lands in. An application shipping its own
+# dashboard writes exactly this shape into its own namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-{{ item.name }}
+  namespace: {{ k8s_observability_namespace }}
+  labels:
+    {{ k8s_observability_grafana_sidecar_dashboards_label }}: "1"
+    app.kubernetes.io/managed-by: ansible
+  annotations:
+    {{ k8s_observability_grafana_sidecar_folder_annotation }}: "{{ item.folder }}"
+    k8s-observability/source: "{{ item.source }}"
+data:
+  {{ item.name }}.json: |
+{{ lookup('file', 'dashboards/' ~ item.name ~ '.json') | indent(4, true) }}

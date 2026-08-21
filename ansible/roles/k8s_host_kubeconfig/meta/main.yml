@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: k8s_host_kubeconfig
+  description: >-
+    Install a kubeconfig cluster/user/context for the Vagrant cluster on the
+    workstation running Vagrant, and make it the current context
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

@@ -1,0 +1,28 @@
+---
+- name: Install etcdctl
+  ansible.builtin.apt:
+    name: "{{ k8s_control_plane_init_etcdctl_package }}"
+    state: present
+    update_cache: true
+  when: k8s_control_plane_init_install_etcdctl
+
+- name: Check for existing kubeadm init
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_control_plane_init_admin_conf
+
+- name: Run kubeadm init
+  ansible.builtin.command: >-
+    kubeadm init
+    --apiserver-advertise-address={{ k8s_control_plane_init_endpoint }}
+    --pod-network-cidr={{ k8s_control_plane_init_pod_network_cidr }}
+    --node-name={{ inventory_hostname }}
+  when: not k8s_control_plane_init_admin_conf.stat.exists
+
+# Mints a fresh 24h token every run; harmless since workers that already
+# joined skip kubeadm join entirely (see the k8s_cluster_join role), and
+# unused tokens simply expire on their own.
+- name: Generate kubeadm join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: k8s_control_plane_init_join_command_result
+  changed_when: false

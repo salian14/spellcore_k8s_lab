@@ -1,0 +1,57 @@
+---
+# Copy this file to host_vars/k8s-control.yml (untracked/local) and uncomment
+# whatever you want to override. Anything left commented keeps the role's
+# default from roles/k8s_observability/defaults/main.yml.
+#
+# This is the intended place to change the observability stack's credentials.
+# The defaults are plaintext lab values -- see the comment above them in
+# roles/k8s_observability/defaults/main.yml for why.
+
+# --- credentials ---
+# minio_root_password and grafana_admin_password must be set explicitly, not
+# left blank: MinIO's chart generates its own when they're empty, which rotates
+# them on every re-provision and breaks Tempo and Loki with S3 auth errors.
+# k8s_observability_minio_root_user: lab-minio
+# k8s_observability_minio_root_password: lab-observability
+# k8s_observability_grafana_admin_user: admin
+# k8s_observability_grafana_admin_password: lab-observability
+
+# --- exposure ---
+# NodePorts these are reached at on the host browser. 30080 is taken by
+# fathom/fathom-agent.
+# k8s_observability_grafana_node_port: 30300
+# k8s_observability_prometheus_node_port: 30090
+
+# --- retention and volume sizes ---
+# Note that prometheus_retention is bounded by prometheus_pvc_size and nothing
+# else: unlike Tempo and Loki, Prometheus has no object-storage tier behind it,
+# so its volume holds the only copy. Raising retention without also raising the
+# volume just means the TSDB starts evicting earlier than the setting claims.
+# k8s_observability_tempo_retention: 72h
+# k8s_observability_loki_retention: 168h
+# k8s_observability_prometheus_retention: 15d
+# k8s_observability_minio_pvc_size: 20Gi
+# k8s_observability_tempo_pvc_size: 10Gi
+# k8s_observability_loki_pvc_size: 10Gi
+# k8s_observability_grafana_pvc_size: 2Gi
+# k8s_observability_prometheus_pvc_size: 20Gi
+
+# --- scrape tuning ---
+# Global scrape interval for every Prometheus target. The chart default is 1m.
+# k8s_observability_prometheus_scrape_interval: 30s
+
+# --- skip switch ---
+# Set to false to leave the Helm releases alone, e.g. to re-run the playbook for
+# the storage prerequisites only.
+# k8s_observability_enabled: true
+
+# NOTE: k8s_node_storage_expand runs on the workers too, so its variables do
+# NOT belong in this file -- a host_vars/k8s-control.yml override would apply to
+# the control plane alone and silently leave the workers unexpanded. Put those
+# in group_vars/all.yml instead:
+#
+#   k8s_node_storage_expand_enabled: true
+#   # +100%FREE claims all remaining volume group space, which forecloses adding
+#   # a separate LV later (a dedicated /var/lib/containerd, say). Use "+32G" or
+#   # similar to leave room.
+#   k8s_node_storage_expand_extents: "+100%FREE"

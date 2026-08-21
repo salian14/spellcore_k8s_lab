@@ -1,0 +1,28 @@
+---
+# --- kubeconfig ---
+# Same convention as the other cluster-facing roles: address the API server
+# through the control plane's admin.conf rather than a KUBECONFIG env var.
+k8s_local_path_storage_kubeconfig: /etc/kubernetes/admin.conf
+
+# --- provisioner ---
+# Applied straight from the upstream release manifest via kubectl, matching how
+# k8s_kubeconfig_cni installs the Tigera operator. Rancher publishes no Helm
+# repository index for this (only an in-tree chart directory), so there is
+# nothing pinnable to add as a chart.
+k8s_local_path_storage_version: "v0.0.37"
+k8s_local_path_storage_manifest_url: "https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ k8s_local_path_storage_version }}/deploy/local-path-storage.yaml"
+k8s_local_path_storage_manifest_remote_path: /tmp/local-path-storage.yaml
+
+k8s_local_path_storage_namespace: local-path-storage
+k8s_local_path_storage_deployment: local-path-provisioner
+
+# The StorageClass the manifest creates. Volumes are plain directories under
+# /opt/local-path-provisioner on whichever node the consuming pod lands on.
+k8s_local_path_storage_class_name: local-path
+
+# The upstream manifest does NOT annotate its StorageClass as the default, so a
+# separate patch is required -- otherwise every chart's PVC stays Pending
+# unless storageClassName is spelled out in each one's values.
+k8s_local_path_storage_set_default: true
+
+k8s_local_path_storage_rollout_timeout: 180

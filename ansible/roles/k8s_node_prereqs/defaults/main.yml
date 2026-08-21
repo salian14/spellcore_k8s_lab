@@ -1,0 +1,66 @@
+---
+# --- prerequisite packages (curl/gpg for the apt repos below, ca-certificates
+#     for HTTPS) ---
+k8s_node_prereqs_prerequisite_packages:
+  - curl
+  - gpg
+  - ca-certificates
+
+k8s_node_prereqs_apt_keyrings_dir: /etc/apt/keyrings
+
+# --- swap ---
+# kubeadm refuses to run with swap enabled.
+k8s_node_prereqs_disable_swap: true
+
+# --- kernel modules ---
+# overlay: required by containerd's overlayfs snapshotter.
+# br_netfilter: lets iptables see bridged traffic, needed for pod networking.
+k8s_node_prereqs_configure_kernel_modules: true
+k8s_node_prereqs_kernel_modules:
+  - overlay
+  - br_netfilter
+k8s_node_prereqs_modules_load_file: /etc/modules-load.d/k8s.conf
+
+# --- sysctl ---
+k8s_node_prereqs_configure_sysctl: true
+k8s_node_prereqs_sysctl_params:
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  net.ipv4.ip_forward: 1
+k8s_node_prereqs_sysctl_file: /etc/sysctl.d/k8s.conf
+
+# --- containerd (Docker's apt repo — same GPG-dearmor/apt_repository
+#     pattern the `vagrant` role uses for HashiCorp's repo) ---
+k8s_node_prereqs_install_containerd: true
+k8s_node_prereqs_docker_gpg_key_url: https://download.docker.com/linux/ubuntu/gpg
+k8s_node_prereqs_docker_keyring: "{{ k8s_node_prereqs_apt_keyrings_dir }}/docker.gpg"
+k8s_node_prereqs_docker_repo_arch: amd64
+k8s_node_prereqs_docker_repo: "deb [arch={{ k8s_node_prereqs_docker_repo_arch }} signed-by={{ k8s_node_prereqs_docker_keyring }}] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+k8s_node_prereqs_containerd_package: containerd.io
+k8s_node_prereqs_containerd_config_path: /etc/containerd/config.toml
+
+# --- kubeadm/kubelet/kubectl (pkgs.k8s.io community repo) ---
+k8s_node_prereqs_kubernetes_version: "1.35.2"
+# Minor-version stream derived from the full version above, e.g. "1.35" —
+# used for the pkgs.k8s.io key/repo URLs, which are versioned per-minor.
+k8s_node_prereqs_kubernetes_minor_version: >-
+  {{ k8s_node_prereqs_kubernetes_version.split('.')[0] }}.{{ k8s_node_prereqs_kubernetes_version.split('.')[1] }}
+k8s_node_prereqs_kubernetes_apt_key_url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_node_prereqs_kubernetes_minor_version }}/deb/Release.key"
+k8s_node_prereqs_kubernetes_keyring: "{{ k8s_node_prereqs_apt_keyrings_dir }}/kubernetes-apt-keyring.gpg"
+k8s_node_prereqs_kubernetes_repo: "deb [signed-by={{ k8s_node_prereqs_kubernetes_keyring }}] https://pkgs.k8s.io/core:/stable:/v{{ k8s_node_prereqs_kubernetes_minor_version }}/deb/ /"
+k8s_node_prereqs_kubernetes_packages:
+  - kubelet
+  - kubeadm
+  - kubectl
+k8s_node_prereqs_hold_kubernetes_packages: true
+
+# --- ufw ---
+# Ubuntu cloud images ship with ufw inactive by default, but kubeadm needs
+# several node-to-node ports open, so guard against it being active.
+k8s_node_prereqs_disable_ufw: true
+
+# --- crictl (debugging aid, ships in the same pkgs.k8s.io repo) ---
+k8s_node_prereqs_install_crictl: true
+k8s_node_prereqs_crictl_package: cri-tools
+k8s_node_prereqs_crictl_config_path: /etc/crictl.yaml
+k8s_node_prereqs_crictl_runtime_endpoint: unix:///run/containerd/containerd.sock

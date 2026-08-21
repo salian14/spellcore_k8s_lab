@@ -1,0 +1,216 @@
+---
+# Only the slurp below runs on k8s-control; everything else is delegated to
+# localhost, meaning the workstation that invoked `vagrant up`. The play sets
+# `become: true` for the slurp's sake (admin.conf is root-only), so every
+# delegated task turns it back off to act as the workstation's own user.
+
+- name: Check that kubectl is available on the workstation
+  ansible.builtin.command: kubectl version --client
+  delegate_to: localhost
+  become: false
+  register: k8s_host_kubeconfig_kubectl_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail when the workstation has no kubectl
+  ansible.builtin.fail:
+    msg: >-
+      kubectl was not found on this workstation, so the {{
+      k8s_host_kubeconfig_context_name }} context cannot be installed. Install
+      kubectl, or set k8s_host_kubeconfig_enabled=false to skip this role.
+  # Defaulted because a missing executable fails the task before rc is set.
+  when: k8s_host_kubeconfig_kubectl_check.rc | default(1) != 0
+
+- name: Read admin.conf from the control-plane node
+  ansible.builtin.slurp:
+    src: /etc/kubernetes/admin.conf
+  register: k8s_host_kubeconfig_admin_conf_slurp
+
+- name: Parse admin.conf
+  ansible.builtin.set_fact:
+    k8s_host_kubeconfig_admin_conf: >-
+      {{ k8s_host_kubeconfig_admin_conf_slurp.content | b64decode | from_yaml }}
+  no_log: true
+
+# admin.conf's own server URL is authoritative: kubeadm wrote
+# --apiserver-advertise-address into it and into the API server cert's SANs,
+# so it's both routable from the host and valid for TLS verification. Only
+# fall back to an operator-supplied override.
+- name: Resolve the API server URL to record in the kubeconfig
+  ansible.builtin.set_fact:
+    k8s_host_kubeconfig_resolved_server: >-
+      {{ k8s_host_kubeconfig_server
+         | default(k8s_host_kubeconfig_admin_conf.clusters[0].cluster.server, true) }}
+
+- name: Stat the kubeconfig's parent directory
+  ansible.builtin.stat:
+    path: "{{ k8s_host_kubeconfig_path | dirname }}"
+  delegate_to: localhost
+  become: false
+  register: k8s_host_kubeconfig_dir_stat
+
+# Created only when absent, deliberately: enforcing `mode` unconditionally
+# would silently retighten an existing ~/.kube that the user set up their own
+# way, and this role has no business changing anything it didn't create.
+- name: Create the kubeconfig's parent directory when missing
+  ansible.builtin.file:
+    path: "{{ k8s_host_kubeconfig_path | dirname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  when: not k8s_host_kubeconfig_dir_stat.stat.exists
+
+- name: Stat the workstation kubeconfig before the update
+  ansible.builtin.stat:
+    path: "{{ k8s_host_kubeconfig_path }}"
+  delegate_to: localhost
+  become: false
+  register: k8s_host_kubeconfig_stat_before
+
+- name: Stat the one-time pre-change backup
+  ansible.builtin.stat:
+    path: "{{ k8s_host_kubeconfig_path }}.pre-spellcore-k8s-lab.bak"
+  delegate_to: localhost
+  become: false
+  register: k8s_host_kubeconfig_backup_stat
+  when: k8s_host_kubeconfig_backup
+
+- name: Back up the workstation kubeconfig as it was before this role first ran
+  ansible.builtin.copy:
+    src: "{{ k8s_host_kubeconfig_path }}"
+    dest: "{{ k8s_host_kubeconfig_path }}.pre-spellcore-k8s-lab.bak"
+    remote_src: true
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when:
+    - k8s_host_kubeconfig_backup
+    - k8s_host_kubeconfig_stat_before.stat.exists
+    # Defaulted rather than relying on the preceding condition short-circuiting
+    # the skipped stat above.
+    - not k8s_host_kubeconfig_backup_stat.stat.exists | default(false)
+
+- name: Install the cluster credentials into the workstation kubeconfig
+  block:
+    # kubectl's --embed-certs reads PEM from files, and admin.conf carries the
+    # CA/client material base64-encoded inline, so it has to land on disk
+    # briefly. Mode 0600 under a private temp dir, removed in `always` below.
+    - name: Create a temporary directory for the extracted credentials
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: spellcore-k8s-lab-kubeconfig.
+      delegate_to: localhost
+      become: false
+      register: k8s_host_kubeconfig_tmpdir
+      changed_when: false
+
+    - name: Write the CA and client credentials out as PEM
+      ansible.builtin.copy:
+        content: "{{ item.data | b64decode }}"
+        dest: "{{ k8s_host_kubeconfig_tmpdir.path }}/{{ item.name }}"
+        mode: "0600"
+      loop:
+        - name: ca.crt
+          data: "{{ k8s_host_kubeconfig_admin_conf.clusters[0].cluster['certificate-authority-data'] }}"
+        - name: client.crt
+          data: "{{ k8s_host_kubeconfig_admin_conf.users[0].user['client-certificate-data'] }}"
+        - name: client.key
+          data: "{{ k8s_host_kubeconfig_admin_conf.users[0].user['client-key-data'] }}"
+      loop_control:
+        label: "{{ item.name }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      changed_when: false
+
+    # These three `kubectl config set-*` calls are what keeps the update
+    # surgical: each one replaces a single named entry in place and leaves
+    # every other cluster, user and context in the file alone.
+    - name: Define the cluster entry
+      ansible.builtin.command: >-
+        kubectl config set-cluster {{ k8s_host_kubeconfig_cluster_name | quote }}
+        --server={{ k8s_host_kubeconfig_resolved_server | quote }}
+        --certificate-authority={{ k8s_host_kubeconfig_tmpdir.path }}/ca.crt
+        --embed-certs=true
+      environment:
+        KUBECONFIG: "{{ k8s_host_kubeconfig_path }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+    - name: Define the user entry
+      ansible.builtin.command: >-
+        kubectl config set-credentials {{ k8s_host_kubeconfig_user_name | quote }}
+        --client-certificate={{ k8s_host_kubeconfig_tmpdir.path }}/client.crt
+        --client-key={{ k8s_host_kubeconfig_tmpdir.path }}/client.key
+        --embed-certs=true
+      environment:
+        KUBECONFIG: "{{ k8s_host_kubeconfig_path }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+    - name: Define the context entry
+      ansible.builtin.command: >-
+        kubectl config set-context {{ k8s_host_kubeconfig_context_name | quote }}
+        --cluster={{ k8s_host_kubeconfig_cluster_name | quote }}
+        --user={{ k8s_host_kubeconfig_user_name | quote }}
+      environment:
+        KUBECONFIG: "{{ k8s_host_kubeconfig_path }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+  always:
+    - name: Remove the temporary credential directory
+      ansible.builtin.file:
+        path: "{{ k8s_host_kubeconfig_tmpdir.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      when: k8s_host_kubeconfig_tmpdir.path is defined
+      changed_when: false
+
+- name: Make the cluster's context current
+  ansible.builtin.command: >-
+    kubectl config use-context {{ k8s_host_kubeconfig_context_name | quote }}
+  environment:
+    KUBECONFIG: "{{ k8s_host_kubeconfig_path }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: k8s_host_kubeconfig_set_current
+
+# The set-* commands above always exit 0 and always print the same thing, so
+# they can't report idempotence themselves. Compare the file's checksum across
+# the whole update instead, which is the honest signal: unchanged kubeconfig,
+# unchanged run.
+- name: Stat the workstation kubeconfig after the update
+  ansible.builtin.stat:
+    path: "{{ k8s_host_kubeconfig_path }}"
+  delegate_to: localhost
+  become: false
+  register: k8s_host_kubeconfig_stat_after
+  changed_when: >-
+    k8s_host_kubeconfig_stat_after.stat.checksum
+    != k8s_host_kubeconfig_stat_before.stat.checksum | default('')
+
+- name: Verify the workstation can reach the cluster with the new context
+  ansible.builtin.command: >-
+    kubectl --context={{ k8s_host_kubeconfig_context_name | quote }} get nodes
+  environment:
+    KUBECONFIG: "{{ k8s_host_kubeconfig_path }}"
+  delegate_to: localhost
+  become: false
+  register: k8s_host_kubeconfig_verify_result
+  changed_when: false
+  when: k8s_host_kubeconfig_verify
+
+- name: Report where the context was installed
+  ansible.builtin.debug:
+    msg: >-
+      Context "{{ k8s_host_kubeconfig_context_name }}" -> {{
+      k8s_host_kubeconfig_resolved_server }} written to {{
+      k8s_host_kubeconfig_path }}{{ k8s_host_kubeconfig_set_current
+      | ternary(' and made current', '') }}.

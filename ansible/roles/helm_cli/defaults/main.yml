@@ -1,0 +1,23 @@
+---
+# --- version ---
+# Pinned to the 3.x line deliberately. Helm 4 is current upstream (and is what
+# the workstation runs), but its release notes call out backward-incompatible
+# changes to CLI flags and output -- and k8s_observability's idempotence guards
+# parse `helm status` and `helm repo list -o json` output. Helm on the VM is a
+# private implementation detail of that role, so there's nothing to gain from
+# tracking 4.x here. Bumping this to a 4.x version is a one-line change plus a
+# re-check of those guards.
+helm_cli_version: "3.21.4"
+
+# Published alongside the tarball at <url>.sha256sum. get_url verifies against
+# this, so a corrupted or substituted download fails the play rather than
+# installing.
+helm_cli_sha256: "61f88ab166748cb19604d7884cb100ae9ccb13804ddeb98e08af167eacbb6a14"
+
+helm_cli_arch: linux-amd64
+helm_cli_url: "https://get.helm.sh/helm-v{{ helm_cli_version }}-{{ helm_cli_arch }}.tar.gz"
+
+# --- install location ---
+helm_cli_binary_path: /usr/local/bin/helm
+helm_cli_download_path: "/tmp/helm-v{{ helm_cli_version }}-{{ helm_cli_arch }}.tar.gz"
+helm_cli_extract_dir: /tmp/helm-extract

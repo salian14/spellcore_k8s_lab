@@ -1,0 +1,45 @@
+---
+# Everything below is gated on this, so a node that isn't LVM-backed is a clean
+# skip rather than a run of failing lvm commands.
+- name: Check whether the root logical volume exists
+  ansible.builtin.stat:
+    path: "{{ k8s_node_storage_expand_lv_path }}"
+  register: k8s_node_storage_expand_lv_stat
+
+- name: Measure unallocated space in the volume group
+  ansible.builtin.command: >-
+    vgs --noheadings --nosuffix --units b
+    -o vg_free {{ k8s_node_storage_expand_vg }}
+  register: k8s_node_storage_expand_vg_free
+  changed_when: false
+  failed_when: false
+  when: k8s_node_storage_expand_lv_stat.stat.exists
+
+# --resizefs hands off to fsadm -> resize2fs. ext4 grows online, so this needs
+# no unmount and no reboot; only growth is ever attempted.
+#
+# The vg_free guard above is what keeps this idempotent: `lvextend +100%FREE`
+# against a volume group with no free extents exits non-zero ("insufficient
+# free space"), which would fail every re-provision.
+- name: Grow the root logical volume into the free volume group space
+  ansible.builtin.command: >-
+    lvextend --resizefs --extents {{ k8s_node_storage_expand_extents }}
+    {{ k8s_node_storage_expand_lv_path }}
+  register: k8s_node_storage_expand_lvextend
+  changed_when: "'successfully resized' in k8s_node_storage_expand_lvextend.stdout"
+  when:
+    - k8s_node_storage_expand_lv_stat.stat.exists
+    - k8s_node_storage_expand_vg_free.rc == 0
+    - (k8s_node_storage_expand_vg_free.stdout | trim | float | int)
+      >= k8s_node_storage_expand_min_free_bytes
+
+- name: Read the resulting root filesystem size
+  ansible.builtin.command: df -h /
+  register: k8s_node_storage_expand_df
+  changed_when: false
+  when: k8s_node_storage_expand_lv_stat.stat.exists
+
+- name: Report the root filesystem size
+  ansible.builtin.debug:
+    msg: "{{ k8s_node_storage_expand_df.stdout_lines }}"
+  when: k8s_node_storage_expand_lv_stat.stat.exists

@@ -1,0 +1,65 @@
+---
+- name: Wait for the Kubernetes API server to become responsive
+  ansible.builtin.command: "kubectl --kubeconfig={{ k8s_local_path_storage_kubeconfig }} get nodes"
+  register: k8s_local_path_storage_api_check
+  until: k8s_local_path_storage_api_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Download the local-path-provisioner manifest
+  ansible.builtin.get_url:
+    url: "{{ k8s_local_path_storage_manifest_url }}"
+    dest: "{{ k8s_local_path_storage_manifest_remote_path }}"
+    mode: "0644"
+
+- name: Apply the local-path-provisioner manifest
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_local_path_storage_kubeconfig }}
+    apply -f {{ k8s_local_path_storage_manifest_remote_path }}
+  register: k8s_local_path_storage_apply
+  changed_when: "'unchanged' not in k8s_local_path_storage_apply.stdout"
+
+# There is no Ready condition on a StorageClass, so the provisioner Deployment
+# becoming Available is the real signal. Without this wait the Helm releases in
+# k8s_observability can race ahead and their PVCs sit Pending with no
+# provisioner listening.
+- name: Wait for the local-path-provisioner deployment to become available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_local_path_storage_kubeconfig }}
+    -n {{ k8s_local_path_storage_namespace }}
+    rollout status deployment/{{ k8s_local_path_storage_deployment }}
+    --timeout={{ k8s_local_path_storage_rollout_timeout }}s
+  changed_when: false
+
+- name: Check whether the StorageClass is already the cluster default
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_local_path_storage_kubeconfig }}
+    get storageclass {{ k8s_local_path_storage_class_name }}
+    -o jsonpath={.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}
+  register: k8s_local_path_storage_default_annotation
+  changed_when: false
+  failed_when: false
+
+- name: Mark the StorageClass as the cluster default
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_local_path_storage_kubeconfig }}
+    patch storageclass {{ k8s_local_path_storage_class_name }}
+    -p {{ k8s_local_path_storage_default_patch | to_json | quote }}
+  vars:
+    k8s_local_path_storage_default_patch:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+  when:
+    - k8s_local_path_storage_set_default
+    - k8s_local_path_storage_default_annotation.stdout | trim != "true"
+
+- name: Read back the cluster StorageClasses
+  ansible.builtin.command: "kubectl --kubeconfig={{ k8s_local_path_storage_kubeconfig }} get storageclass"
+  register: k8s_local_path_storage_classes
+  changed_when: false
+
+- name: Report the cluster StorageClasses
+  ansible.builtin.debug:
+    msg: "{{ k8s_local_path_storage_classes.stdout_lines }}"

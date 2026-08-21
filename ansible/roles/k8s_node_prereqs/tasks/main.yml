@@ -1,0 +1,228 @@
+---
+- name: Install prerequisite packages
+  ansible.builtin.apt:
+    name: "{{ k8s_node_prereqs_prerequisite_packages }}"
+    state: present
+    update_cache: true
+
+- name: Ensure apt keyrings directory exists
+  ansible.builtin.file:
+    path: "{{ k8s_node_prereqs_apt_keyrings_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Check active swap
+  ansible.builtin.command: swapon --show
+  register: k8s_node_prereqs_swap_status
+  changed_when: false
+  when: k8s_node_prereqs_disable_swap
+
+- name: Disable swap now
+  ansible.builtin.command: swapoff -a
+  when:
+    - k8s_node_prereqs_disable_swap
+    - k8s_node_prereqs_swap_status.stdout != ""
+
+- name: Comment out swap entries in /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#\n]*\sswap\s.*)$'
+    replace: '# \1'
+  when: k8s_node_prereqs_disable_swap
+
+- name: Deploy kernel modules load file
+  ansible.builtin.template:
+    src: k8s-modules.conf.j2
+    dest: "{{ k8s_node_prereqs_modules_load_file }}"
+    mode: "0644"
+  when: k8s_node_prereqs_configure_kernel_modules
+
+- name: Check currently loaded kernel modules
+  ansible.builtin.command: lsmod
+  register: k8s_node_prereqs_lsmod
+  changed_when: false
+  when: k8s_node_prereqs_configure_kernel_modules
+
+- name: Load kernel modules
+  ansible.builtin.command: "modprobe {{ item }}"
+  loop: "{{ k8s_node_prereqs_kernel_modules }}"
+  when:
+    - k8s_node_prereqs_configure_kernel_modules
+    - item not in k8s_node_prereqs_lsmod.stdout
+
+- name: Deploy sysctl params file
+  ansible.builtin.template:
+    src: k8s-sysctl.conf.j2
+    dest: "{{ k8s_node_prereqs_sysctl_file }}"
+    mode: "0644"
+  register: k8s_node_prereqs_sysctl_conf
+  when: k8s_node_prereqs_configure_sysctl
+
+- name: Apply sysctl params
+  ansible.builtin.command: sysctl --system
+  when:
+    - k8s_node_prereqs_configure_sysctl
+    - k8s_node_prereqs_sysctl_conf.changed
+
+- name: Download Docker GPG key
+  ansible.builtin.get_url:
+    url: "{{ k8s_node_prereqs_docker_gpg_key_url }}"
+    dest: /tmp/docker-gpg-key
+    mode: "0644"
+  when: k8s_node_prereqs_install_containerd
+
+- name: Dearmor Docker GPG key into apt keyring
+  ansible.builtin.command:
+    cmd: "gpg --dearmor --yes --output {{ k8s_node_prereqs_docker_keyring }} /tmp/docker-gpg-key"
+    creates: "{{ k8s_node_prereqs_docker_keyring }}"
+  when: k8s_node_prereqs_install_containerd
+
+- name: Add Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ k8s_node_prereqs_docker_repo }}"
+    filename: docker
+    state: present
+  register: k8s_node_prereqs_docker_repo_added
+  when: k8s_node_prereqs_install_containerd
+
+- name: Update apt cache after adding Docker repo
+  ansible.builtin.apt:
+    update_cache: true
+  when:
+    - k8s_node_prereqs_install_containerd
+    - k8s_node_prereqs_docker_repo_added.changed
+
+- name: Install containerd
+  ansible.builtin.apt:
+    name: "{{ k8s_node_prereqs_containerd_package }}"
+    state: present
+  when: k8s_node_prereqs_install_containerd
+
+- name: Check for existing containerd config
+  ansible.builtin.stat:
+    path: "{{ k8s_node_prereqs_containerd_config_path }}"
+  register: k8s_node_prereqs_containerd_config_stat
+  when: k8s_node_prereqs_install_containerd
+
+- name: Generate default containerd config
+  ansible.builtin.command: containerd config default
+  register: k8s_node_prereqs_containerd_default
+  changed_when: false
+  when:
+    - k8s_node_prereqs_install_containerd
+    - not k8s_node_prereqs_containerd_config_stat.stat.exists
+
+- name: Write default containerd config
+  ansible.builtin.copy:
+    content: "{{ k8s_node_prereqs_containerd_default.stdout }}\n"
+    dest: "{{ k8s_node_prereqs_containerd_config_path }}"
+    mode: "0644"
+  register: k8s_node_prereqs_containerd_config_written
+  when:
+    - k8s_node_prereqs_install_containerd
+    - not k8s_node_prereqs_containerd_config_stat.stat.exists
+
+- name: Enable SystemdCgroup in containerd config
+  ansible.builtin.replace:
+    path: "{{ k8s_node_prereqs_containerd_config_path }}"
+    regexp: '^(\s*SystemdCgroup\s*=\s*)false'
+    replace: '\1true'
+  register: k8s_node_prereqs_containerd_cgroup
+  when: k8s_node_prereqs_install_containerd
+
+- name: Ensure CRI plugin is not disabled in containerd config
+  ansible.builtin.replace:
+    path: "{{ k8s_node_prereqs_containerd_config_path }}"
+    regexp: '^disabled_plugins\s*=\s*\[.*\]\s*$'
+    replace: 'disabled_plugins = []'
+  register: k8s_node_prereqs_containerd_cri_enabled
+  when: k8s_node_prereqs_install_containerd
+
+- name: Enable and start containerd
+  ansible.builtin.service:
+    name: containerd
+    enabled: true
+    state: started
+  when: k8s_node_prereqs_install_containerd
+
+- name: Restart containerd if config changed
+  ansible.builtin.service:
+    name: containerd
+    state: restarted
+  when:
+    - k8s_node_prereqs_install_containerd
+    - k8s_node_prereqs_containerd_cgroup.changed
+      or k8s_node_prereqs_containerd_cri_enabled.changed
+      or (k8s_node_prereqs_containerd_config_written is defined and k8s_node_prereqs_containerd_config_written.changed)
+
+- name: Download Kubernetes apt Release key
+  ansible.builtin.get_url:
+    url: "{{ k8s_node_prereqs_kubernetes_apt_key_url }}"
+    dest: /tmp/kubernetes-release.key
+    mode: "0644"
+
+- name: Dearmor Kubernetes apt key into apt keyring
+  ansible.builtin.command:
+    cmd: "gpg --dearmor --yes --output {{ k8s_node_prereqs_kubernetes_keyring }} /tmp/kubernetes-release.key"
+    creates: "{{ k8s_node_prereqs_kubernetes_keyring }}"
+
+- name: Add Kubernetes apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ k8s_node_prereqs_kubernetes_repo }}"
+    filename: kubernetes
+    state: present
+  register: k8s_node_prereqs_kubernetes_repo_added
+
+- name: Update apt cache after adding Kubernetes repo
+  ansible.builtin.apt:
+    update_cache: true
+  when: k8s_node_prereqs_kubernetes_repo_added.changed
+
+- name: Install kubelet, kubeadm, kubectl pinned to the configured version
+  ansible.builtin.apt:
+    name: "{{ k8s_node_prereqs_kubernetes_packages | map('regex_replace', '$', '=' + k8s_node_prereqs_kubernetes_version + '-*') | list }}"
+    state: present
+    allow_downgrade: true
+
+- name: Hold kubelet, kubeadm, kubectl at the installed version
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ k8s_node_prereqs_kubernetes_packages }}"
+  when: k8s_node_prereqs_hold_kubernetes_packages
+
+# kubelet will repeatedly fail/restart here until `kubeadm init`/`join`
+# supplies it a config at /var/lib/kubelet/config.yaml — expected, not a
+# failure condition for this role.
+- name: Enable and start kubelet
+  ansible.builtin.service:
+    name: kubelet
+    enabled: true
+    state: started
+
+- name: Check ufw status
+  ansible.builtin.command: ufw status
+  register: k8s_node_prereqs_ufw_status
+  changed_when: false
+  failed_when: false
+  when: k8s_node_prereqs_disable_ufw
+
+- name: Disable ufw if active
+  ansible.builtin.command: ufw disable
+  when:
+    - k8s_node_prereqs_disable_ufw
+    - k8s_node_prereqs_ufw_status.rc == 0
+    - "'Status: active' in k8s_node_prereqs_ufw_status.stdout"
+
+- name: Install cri-tools (crictl)
+  ansible.builtin.apt:
+    name: "{{ k8s_node_prereqs_crictl_package }}"
+    state: present
+  when: k8s_node_prereqs_install_crictl
+
+- name: Deploy crictl config
+  ansible.builtin.template:
+    src: crictl.yaml.j2
+    dest: "{{ k8s_node_prereqs_crictl_config_path }}"
+    mode: "0644"
+  when: k8s_node_prereqs_install_crictl

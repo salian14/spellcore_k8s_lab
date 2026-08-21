@@ -1,0 +1,135 @@
+---
+# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+#
+# A single gateway Deployment, not a DaemonSet. Traces and logs are pushed to it
+# over OTLP, so there is nothing node-local to collect; a DaemonSet would only
+# be needed to tail container logs off each node's disk or scrape kubelet stats.
+mode: deployment
+replicaCount: 1
+
+# Without this the release name expands to
+# otel-collector-opentelemetry-collector.
+fullnameOverride: otel-collector
+
+# Both mandatory in chart 0.170.0: values.yaml ships image.repository: "" and
+# templates/NOTES.txt calls fail "[ERROR] 'image.repository' must be set.".
+# command.name must match the distro's binary name.
+image:
+  repository: {{ k8s_observability_otel_image_repository }}
+  tag: "{{ k8s_observability_otel_image_tag }}"
+command:
+  name: {{ k8s_observability_otel_command_name }}
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ClusterIP is enough for cluster-wide reach: this cluster has no default-deny
+# NetworkPolicy, so pods in any namespace resolve and connect to this Service.
+# A headless Service would only matter past one replica, where OTLP/gRPC's
+# long-lived HTTP/2 connections pin each client to one backend through the vIP.
+service:
+  type: ClusterIP
+
+presets:
+  # Stamps k8s.pod.name / k8s.namespace.name / k8s.node.name onto every span,
+  # which is what makes traces navigable in Grafana. Also generates the
+  # ClusterRole and binding, so no hand-written RBAC is needed.
+  kubernetesAttributes:
+    enabled: true
+  kubernetesEvents:
+    enabled: true
+    # true selects the k8s_events receiver and grants core ""/events. Setting
+    # this false switches to k8sobjects against events.k8s.io instead, which
+    # gives a silently empty events stream if the RBAC doesn't match.
+    useK8sEventsReceiver: true
+
+# These Service ports default to enabled and would advertise ports that nothing
+# listens on once the matching receivers are removed below.
+ports:
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+
+config:
+  receivers:
+    # Nulling defaults out of `config` works because this chart is installed
+    # top-level; the technique is documented as broken when it is a subchart.
+    jaeger: null
+    zipkin: null
+    # Stays null, and the chart's clusterMetrics/kubeletMetrics presets stay off
+    # too. Prometheus already scrapes kube-state-metrics and cAdvisor directly;
+    # collecting the same ground here as well would double-count every cluster
+    # metric under two different naming schemes (k8s.pod.* vs kube_pod_*).
+    prometheus: null
+    # otlp is left at the chart default, which binds ${env:MY_POD_IP}:4317 and
+    # :4318 -- not localhost -- so the ClusterIP Service works unmodified.
+    # Don't "fix" these to 0.0.0.0.
+
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+    batch:
+      timeout: 5s
+      send_batch_size: 1024
+    # Metrics pipeline only. OTel SDKs commonly export delta temporality
+    # (each point is "what changed since last time"), while Prometheus stores
+    # cumulative counters. Without this the counters ingest without error and
+    # then read as sawtooths in PromQL -- rate() on them is nonsense.
+    deltatocumulative: {}
+
+  exporters:
+    debug: null
+    otlp/tempo:
+      endpoint: {{ k8s_observability_tempo_service }}:4317
+      tls:
+        insecure: true
+    otlphttp/loki:
+      # Loki 3.x exposes a native OTLP ingest path at /otlp/v1/logs.
+      endpoint: http://{{ k8s_observability_loki_service }}:{{ k8s_observability_loki_http_port }}/otlp
+    otlphttp/prometheus:
+      # Prometheus 3 ingests OTLP natively; this is otlphttp rather than the
+      # more obvious prometheusremotewrite because the pinned
+      # otel-collector-k8s distro DOES NOT CONTAIN that exporter -- its whole
+      # exporter set is debug, nop, otlp, otlphttp, file, loadbalancing and
+      # otelarrow. Do not "fix" this by switching to the contrib image; the
+      # small distro is still sufficient, which is the point of the note above.
+      #
+      # otlphttp appends /v1/metrics to the endpoint, so the path Prometheus
+      # actually receives on is /api/v1/otlp/v1/metrics. Enabled there by the
+      # web.enable-otlp-receiver flag in prometheus-values.yaml.j2.
+      endpoint: http://{{ k8s_observability_prometheus_service }}:{{ k8s_observability_prometheus_http_port }}/api/v1/otlp
+
+  service:
+    pipelines:
+      # The presets above edit these lists after the fact: kubernetesAttributes
+      # prepends the k8sattributes processor to all three pipelines, and
+      # kubernetesEvents appends the k8s_events receiver to `logs` only.
+      #
+      # deltatocumulative sits after memory_limiter and before batch: it has to
+      # see every point of a series to convert it, so batching ahead of it would
+      # hand it pre-grouped data and dropping it under memory pressure is
+      # preferable to converting points that are about to be discarded.
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, deltatocumulative, batch]
+        exporters: [otlphttp/prometheus]
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp/tempo]
+      logs:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlphttp/loki]

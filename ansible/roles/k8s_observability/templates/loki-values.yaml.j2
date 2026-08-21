@@ -1,0 +1,109 @@
+---
+# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+#
+# This chart's defaults are the most dangerous of the five. Out of the box it is
+# SimpleScalable with read/write/backend at three replicas each, plus an nginx
+# gateway, a canary DaemonSet, a test pod and two memcached tiers -- chunksCache
+# alone requests 8Gi. That is ~13 pods and roughly 10Gi of memory requests on a
+# cluster with two schedulable 7.8Gi nodes. Every disable below is required, not
+# tidying.
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false # single tenant; Grafana sends no X-Scope-OrgID
+  analytics:
+    reporting_enabled: false
+
+  commonConfig:
+    path_prefix: /var/loki
+    replication_factor: 1 # chart default is 3, which cannot start on one pod
+
+  # Mandatory: templates/validate.yaml fails the render outright without a
+  # schemaConfig. useTestSchema is not a substitute -- it has no persistence.
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  storage:
+    type: s3
+    # Leave the thanos client off, so the legacy loki.storage.s3 block below is
+    # the one that's read. Flipping this to true switches Loki to
+    # loki.storage.object_store.s3 with snake_case keys instead, and the
+    # camelCase keys here would be silently ignored.
+    use_thanos_objstore: false
+    # Required by the templates but absent from the chart's own values.yaml;
+    # omitting it fails with "Please define loki.storage.bucketNames.chunks".
+    bucketNames:
+      chunks: {{ k8s_observability_loki_chunks_bucket }}
+      ruler: {{ k8s_observability_loki_ruler_bucket }}
+    s3:
+      endpoint: {{ k8s_observability_minio_service }}:9000
+      accessKeyId: "{{ k8s_observability_minio_root_user }}"
+      secretAccessKey: "{{ k8s_observability_minio_root_password }}"
+      s3ForcePathStyle: true
+      insecure: true
+      region: us-east-1
+
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    delete_request_store: s3
+
+  limits_config:
+    retention_period: {{ k8s_observability_loki_retention }}
+    # Required for the OTLP ingest path: trace_id and span_id arrive as
+    # structured metadata, which is what makes the Grafana log-to-trace jump
+    # work at all.
+    allow_structured_metadata: true
+    volume_enabled: true
+
+singleBinary:
+  replicas: 1 # chart default is 0 -- forget this and Helm reports success on an empty release
+  resources:
+    requests:
+      cpu: 300m
+      memory: 768Mi
+    limits:
+      cpu: 1500m
+      memory: 2Gi
+  persistence:
+    enabled: true
+    size: {{ k8s_observability_loki_pvc_size }}
+    storageClass: {{ k8s_observability_storage_class }}
+
+# Mandatory: these default to 3 each, and templates/validate.yaml calls fail
+# when singleBinary.replicas and any scalable replica are both non-zero.
+# deploymentMode: SingleBinary does not zero them for you.
+write:
+  replicas: 0
+read:
+  replicas: 0
+backend:
+  replicas: 0
+
+chunksCache:
+  enabled: false # 8Gi memcached StatefulSet
+resultsCache:
+  enabled: false # 1Gi memcached StatefulSet
+gateway:
+  enabled: false # nginx Deployment; nothing here needs it
+lokiCanary:
+  enabled: false # DaemonSet on every node
+test:
+  enabled: false # must also be false: validate.yaml fails if the canary is off but this is on
+minio:
+  enabled: false # we run MinIO as its own release, shared with Tempo
+sidecar:
+  rules:
+    enabled: false # injects a k8s-sidecar container into the loki pod
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false

@@ -1,0 +1,7 @@
+---
+# Restarting containerd does not stop running containers -- their shims keep
+# them alive across the restart -- so this is safe on a live node.
+- name: Restart containerd
+  ansible.builtin.service:
+    name: containerd
+    state: restarted

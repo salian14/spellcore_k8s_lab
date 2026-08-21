@@ -1,0 +1,12 @@
+{{ ansible_managed | comment }}
+# Mirror configuration for {{ containerd_registry_trust_endpoint }}, read by
+# containerd from {{ containerd_registry_trust_certs_dir }}/<host>/hosts.toml.
+# The http:// scheme here is what allows a plain-HTTP pull; without it
+# containerd would try TLS and fail.
+server = "{{ containerd_registry_trust_url }}"
+
+[host."{{ containerd_registry_trust_url }}"]
+  capabilities = [{{ containerd_registry_trust_capabilities | map('to_json') | join(', ') }}]
+{% if containerd_registry_trust_skip_verify %}
+  skip_verify = true
+{% endif %}

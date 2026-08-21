@@ -1,0 +1,113 @@
+---
+# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+#
+# The plain `prometheus` server chart: one Deployment, no operator, no CRDs.
+# kube-state-metrics and node-exporter ride along as bundled subcharts, so this
+# is one Helm release rather than three.
+server:
+  retention: {{ k8s_observability_prometheus_retention }}
+
+  global:
+    scrape_interval: {{ k8s_observability_prometheus_scrape_interval }}
+
+  # Written bare, WITHOUT a leading `--`: templates/deploy.yaml ranges over this
+  # list and prepends the dashes itself, so "--web.enable-lifecycle" here would
+  # render as "----web.enable-lifecycle" and Prometheus would refuse to start.
+  extraFlags:
+    # Chart default. Keep it -- dropping it silently removes /-/reload.
+    - web.enable-lifecycle
+    # Tempo's metrics-generator remote-writes span-metrics and service-graphs
+    # into /api/v1/write. Without this flag that endpoint 404s and the
+    # generator logs write failures forever.
+    - web.enable-remote-write-receiver
+    # The OTLP collector gateway pushes application metrics to /api/v1/otlp.
+    # Same deal: the receiver does not exist until this flag turns it on.
+    - web.enable-otlp-receiver
+    # Exemplar storage is off by default and exemplars are DROPPED on ingest
+    # without it -- no error, they simply never appear. Grafana's Prometheus
+    # datasource is configured with exemplarTraceIdDestinations pointing at
+    # Tempo, which does nothing at all unless this is set.
+    - enable-feature=exemplar-storage
+
+  # Rendered into prometheus.yml's top-level `otlp:` block by templates/cm.yaml.
+  otlp:
+    # OTel metric names are dotted (http.server.duration); Prometheus names are
+    # underscored. This strategy does the translation and keeps the _total /
+    # _seconds unit suffixes, which is what PromQL and Grafana expect.
+    translation_strategy: NoUTF8EscapingWithSuffixes
+    # OTLP resource attributes are otherwise flattened into a single
+    # `target_info` metric and are NOT queryable as labels. Promoting these
+    # lifts them onto every series, so a metric can be filtered by service or
+    # by pod the same way a span can.
+    promote_resource_attributes:
+      - service.name
+      - service.namespace
+      - k8s.namespace.name
+      - k8s.pod.name
+      - k8s.node.name
+
+  # No S3 backend exists for Prometheus, so this volume is the only copy of the
+  # metrics -- unlike Tempo and Loki, nothing here is flushed to MinIO.
+  persistentVolume:
+    enabled: true
+    size: {{ k8s_observability_prometheus_pvc_size }}
+    storageClass: {{ k8s_observability_storage_class }}
+
+  # NodePort as well as the Grafana datasource: /targets is the page that
+  # answers "why is this metric missing?", and Grafana cannot show it.
+  service:
+    type: NodePort
+    nodePort: {{ k8s_observability_prometheus_node_port }}
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+# Off: an Alertmanager with no routes and no receivers configured is two idle
+# pods and a PVC. Flip to true and add `config:` when there are alerts to route.
+alertmanager:
+  enabled: false
+
+# Off: nothing in this lab pushes batch-job metrics. It is also the only
+# component here that would need its own PVC to be useful.
+prometheus-pushgateway:
+  enabled: false
+
+scrapeConfigs:
+  # The matching scrape job discovers Services annotated
+  # prometheus.io/probe: pushgateway. With the subchart off it would find
+  # nothing and sit as an empty job -- harmless, but it clutters /targets.
+  prometheus-pushgateway:
+    enabled: false
+
+# Cluster object state: pod phases, deployment replica counts, PVC status.
+# Its Service is annotated prometheus.io/scrape by the subchart's own
+# `prometheusScrape: true` default, so the chart's kubernetes-service-endpoints
+# job finds it with no annotation needed here.
+kube-state-metrics:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Host-level CPU, memory, disk and network per node. Its default tolerations are
+# `effect: NoSchedule, operator: Exists`, so unlike everything else in this
+# stack the DaemonSet DOES land on k8s-control -- which is what makes all three
+# nodes report. That is deliberate; it collects, it does not schedule work.
+prometheus-node-exporter:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

@@ -1,0 +1,12 @@
+---
+# --- etcdctl ---
+k8s_control_plane_init_install_etcdctl: true
+k8s_control_plane_init_etcdctl_package: etcd-client
+
+# --- kubeadm init ---
+# Must track k8s-control's IP in the ../Vagrantfile.
+k8s_control_plane_init_endpoint: "192.168.56.10"
+
+# Must match calicoNetwork.ipPools[0].cidr in the k8s_kubeconfig_cni role's
+# custom-resources.yaml.
+k8s_control_plane_init_pod_network_cidr: "10.244.0.0/16"

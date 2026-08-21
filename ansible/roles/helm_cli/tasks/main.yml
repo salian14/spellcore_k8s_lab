@@ -1,0 +1,68 @@
+---
+# Checked with stat rather than by running the binary: when the executable is
+# absent the command module can fail before it sets rc, leaving nothing reliable
+# to branch on.
+- name: Check whether a helm binary is present
+  ansible.builtin.stat:
+    path: "{{ helm_cli_binary_path }}"
+  register: helm_cli_binary_stat
+
+- name: Read the existing helm version
+  ansible.builtin.command: "{{ helm_cli_binary_path }} version --short"
+  register: helm_cli_existing
+  changed_when: false
+  failed_when: false
+  when: helm_cli_binary_stat.stat.exists
+
+# One fact drives every task below: either helm is missing, or it's the wrong
+# version. `version --short` prints e.g. "v3.21.4+g1234567", so a substring
+# match against the pinned version is enough.
+- name: Decide whether helm needs installing
+  ansible.builtin.set_fact:
+    helm_cli_install_required: >-
+      {{ not helm_cli_binary_stat.stat.exists
+         or helm_cli_existing.rc | default(1) != 0
+         or ('v' + helm_cli_version) not in (helm_cli_existing.stdout | default('')) }}
+
+- name: Download the helm release archive
+  ansible.builtin.get_url:
+    url: "{{ helm_cli_url }}"
+    dest: "{{ helm_cli_download_path }}"
+    checksum: "sha256:{{ helm_cli_sha256 }}"
+    mode: "0644"
+  when: helm_cli_install_required
+
+- name: Ensure the helm extraction directory exists
+  ansible.builtin.file:
+    path: "{{ helm_cli_extract_dir }}"
+    state: directory
+    mode: "0755"
+  when: helm_cli_install_required
+
+- name: Unpack the helm release archive
+  ansible.builtin.unarchive:
+    src: "{{ helm_cli_download_path }}"
+    dest: "{{ helm_cli_extract_dir }}"
+    remote_src: true
+  when: helm_cli_install_required
+
+# The archive nests the binary under <arch>/, so this lifts it out rather than
+# putting the whole tree on PATH.
+- name: Install the helm binary
+  ansible.builtin.copy:
+    src: "{{ helm_cli_extract_dir }}/{{ helm_cli_arch }}/helm"
+    dest: "{{ helm_cli_binary_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: helm_cli_install_required
+
+- name: Verify the installed helm version
+  ansible.builtin.command: "{{ helm_cli_binary_path }} version --short"
+  register: helm_cli_installed
+  changed_when: false
+
+- name: Report the installed helm version
+  ansible.builtin.debug:
+    msg: "helm {{ helm_cli_installed.stdout | trim }} at {{ helm_cli_binary_path }}"

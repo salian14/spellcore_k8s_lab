@@ -1,0 +1,74 @@
+---
+# --- kubeconfig ---
+# Same convention as the other cluster-facing roles: address the API server
+# through the control plane's admin.conf rather than a KUBECONFIG env var.
+k8s_metrics_server_kubeconfig: /etc/kubernetes/admin.conf
+
+# --- metrics-server ---
+# Applied from the upstream release manifest via kubectl, matching
+# k8s_local_path_storage and k8s_kubeconfig_cni rather than the helm pattern in
+# k8s_observability. That is deliberate: helm only exists on the VM because
+# k8s-observability.yml installs helm_cli, and metrics.k8s.io is core cluster
+# API surface that must not acquire a dependency on the telemetry stack.
+#
+# v0.9.0 builds against Kubernetes 1.36.2; the cluster is on
+# k8s_node_prereqs_kubernetes_version 1.35.2.
+k8s_metrics_server_version: "v0.9.0"
+k8s_metrics_server_manifest_url: "https://github.com/kubernetes-sigs/metrics-server/releases/download/{{ k8s_metrics_server_version }}/components.yaml"
+k8s_metrics_server_manifest_remote_path: "/tmp/metrics-server-{{ k8s_metrics_server_version }}.yaml"
+
+# The manifest hardcodes kube-system, so this is read, never written -- it is
+# here so the kubectl invocations below don't repeat a bare string.
+k8s_metrics_server_namespace: kube-system
+k8s_metrics_server_deployment: metrics-server
+
+# The aggregated API the manifest registers. Serving this is the entire point
+# of the role: it is what `kubectl top` and the HorizontalPodAutoscaler read.
+k8s_metrics_server_apiservice: v1beta1.metrics.k8s.io
+
+# --- kubelet TLS ---
+# `kubeadm init` leaves serverTLSBootstrap at its default of false, so every
+# kubelet serves a self-signed certificate that the cluster CA did not issue --
+# confirmed on this cluster by `kubectl get csr` returning nothing. Without the
+# flag below, metrics-server starts and goes Ready but every scrape fails with
+# `x509: cannot validate certificate for 192.168.56.11 because it doesn't
+# contain any IP SANs`, and `kubectl top` reports "metrics not available yet"
+# forever.
+#
+# The alternative is serverTLSBootstrap: true in the kubelet config plus
+# approving a kubelet-serving CSR per node on every certificate rotation. On an
+# isolated Vagrant private network that buys nothing, and it would add a manual
+# step to `vagrant up`. Do not carry this setting into anything that isn't a
+# lab.
+k8s_metrics_server_kubelet_insecure_tls: true
+
+# Replaced wholesale rather than appended, because `kubectl patch --type=json`
+# with an `add` op on `args/-` is not idempotent and would stack a duplicate
+# flag on every provision. The first five entries are the upstream v0.9.0
+# defaults reproduced verbatim -- re-check them against components.yaml on a
+# version bump, since a flag added upstream would otherwise be silently
+# dropped here.
+#
+# --kubelet-preferred-address-types is left exactly as upstream ships it.
+# InternalIP leads, and on this cluster the node InternalIPs are the private
+# network addresses (192.168.56.10/.11/.12), not the Vagrant NAT 10.0.2.15 they
+# would be if kubelet had picked the default-route interface -- so scrapes
+# reach the right host. Verify with `kubectl get nodes -o wide` before changing
+# this ordering.
+k8s_metrics_server_args:
+  - --cert-dir=/tmp
+  - --secure-port=10250
+  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+  - --kubelet-use-node-status-port
+  - --metric-resolution=15s
+  - --kubelet-insecure-tls
+
+# --- timeouts ---
+k8s_metrics_server_rollout_timeout: 180
+
+# The aggregation layer needs a moment past the Deployment becoming Available
+# before it will route metrics.k8s.io, and metrics-server itself has nothing to
+# serve until one --metric-resolution window has elapsed.
+k8s_metrics_server_apiservice_timeout: 120
+k8s_metrics_server_top_retries: 12
+k8s_metrics_server_top_delay: 5

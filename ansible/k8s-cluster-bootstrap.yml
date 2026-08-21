@@ -1,0 +1,40 @@
+---
+- name: Initialize the Kubernetes control plane
+  hosts: k8s_control
+  become: true
+  roles:
+    - k8s_control_plane_init
+
+- name: Configure kubectl and install the CNI on the control plane
+  hosts: k8s_control
+  become: true
+  roles:
+    - k8s_kubeconfig_cni
+
+- name: Join worker nodes to the cluster
+  hosts: k8s_workers
+  become: true
+  roles:
+    - k8s_cluster_join
+
+# After the workers have joined, so the readiness check at the end of the role
+# covers every node rather than just the control plane. Lives here rather than
+# in k8s-observability.yml on purpose: metrics.k8s.io is core cluster API
+# surface that `kubectl top` and every HorizontalPodAutoscaler depend on, and
+# it must not inherit the failure modes of the telemetry stack.
+- name: Install the metrics server
+  hosts: k8s_control
+  become: true
+  roles:
+    - role: k8s_metrics_server
+      when: k8s_metrics_server_enabled | default(true)
+
+# Runs last, once the cluster is complete, so the context it installs on the
+# workstation is immediately usable. Targets k8s_control only to read
+# admin.conf off it -- the kubeconfig work itself is delegated to localhost.
+- name: Install a workstation kubeconfig context for the cluster
+  hosts: k8s_control
+  become: true
+  roles:
+    - role: k8s_host_kubeconfig
+      when: k8s_host_kubeconfig_enabled | default(true)

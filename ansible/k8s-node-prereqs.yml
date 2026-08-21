@@ -1,0 +1,6 @@
+---
+- name: Configure Kubernetes node prerequisites
+  hosts: all
+  become: true
+  roles:
+    - k8s_node_prereqs

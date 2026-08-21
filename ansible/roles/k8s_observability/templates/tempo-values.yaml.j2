@@ -1,0 +1,121 @@
+---
+# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+#
+# This is the monolithic `tempo` chart: one StatefulSet, no subchart
+# dependencies. Not `tempo-distributed`, which ships the same appVersion but
+# deploys distributor/ingester/querier/compactor/query-frontend separately.
+replicas: 1
+
+tempo:
+  # The chart defaults this to 1024, reserving a gigabyte of heap ballast that
+  # Go 1.19+ makes pointless.
+  memBallastSizeMbs: 0
+  reportingEnabled: false
+  retention: {{ k8s_observability_tempo_retention }}
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+  storage:
+    trace:
+      # Chart default is "local", which would keep every block on the node.
+      backend: s3
+      s3:
+        bucket: {{ k8s_observability_tempo_bucket }}
+        # Host:port with no scheme -- Tempo's S3 client takes the scheme from
+        # the `insecure` flag below, and a scheme here fails to connect.
+        endpoint: {{ k8s_observability_minio_service }}:9000
+        access_key: "{{ k8s_observability_minio_root_user }}"
+        secret_key: "{{ k8s_observability_minio_root_password }}"
+        insecure: true
+        forcepathstyle: true
+        region: us-east-1
+      wal:
+        path: /var/tempo/wal
+
+  # TraceQL metrics queries -- anything with `| rate()`, `| count_over_time()`
+  # and so every panel in Grafana's Traces Drilldown -- are answered by the
+  # metrics-generator over its own recent blocks, not by the querier reading
+  # Tempo's. Leave this off and the generator module starts but never joins its
+  # ring ("no metrics_generator.storage.path configured"), so those queries fail
+  # with "error finding generators: empty ring" while plain trace search still
+  # works. Ordinary TraceQL search does not need any of this.
+  metricsGenerator:
+    enabled: true
+    # NOTE: there is deliberately no `remoteWriteUrl:` here. The chart uses that
+    # scalar only when storage.remote_write below is empty, and it can carry
+    # nothing but a URL -- send_exemplars needs the full remote_write form. Set
+    # both and this one is silently ignored, so it is omitted rather than left
+    # to rot at a value nothing reads.
+    processor:
+      local_blocks:
+        # Flush the generator's completed blocks to MinIO. Without this its data
+        # is memory-only, so metrics queries see nothing older than the current
+        # block and lose everything on a pod restart.
+        flush_to_storage: true
+        # Chart/Tempo default is true, which counts only server spans. The
+        # drilldown views break down every span, including client and internal.
+        filter_server_spans: false
+      # RED metrics per service and per span: request counts, error counts and
+      # duration histograms, remote-written to Prometheus as traces_spanmetrics_*.
+      span_metrics: {}
+      # Service-to-service call counts and latencies, derived by pairing client
+      # spans with their server side. This is what populates Grafana's Service
+      # Graph tab on the Tempo datasource, via traces_service_graph_*.
+      service_graphs: {}
+    storage:
+      # Chart default is /tmp/tempo -- the container's ephemeral layer, not the
+      # PVC. /var/tempo is the persistent mount, same volume as the trace WAL.
+      path: /var/tempo/generator/wal
+      # The generator's own output goes here. Prometheus only accepts it because
+      # prometheus-values.yaml.j2 sets the web.enable-remote-write-receiver
+      # flag; without that flag this endpoint 404s and the generator retries
+      # forever with nothing to show for it.
+      remote_write:
+        - url: "http://{{ k8s_observability_prometheus_service }}:{{ k8s_observability_prometheus_http_port }}/api/v1/write"
+          # Carries the trace_id exemplars that let a spike on a span-metrics
+          # panel in Grafana jump straight to a trace that caused it. Prometheus
+          # drops exemplars unless it was started with
+          # --enable-feature=exemplar-storage, which is set alongside the
+          # receiver flag above.
+          send_exemplars: true
+    traces_storage:
+      path: /var/tempo/generator/traces
+
+  # Enabling the component above is only half of it: a tenant gets a generator
+  # only if its overrides name the processors to run, and the chart's default
+  # `overrides.defaults: {}` names none. Helm merges maps, so the chart's
+  # per_tenant_override_config default survives this.
+  overrides:
+    defaults:
+      metrics_generator:
+        # Hyphens here, underscores under `processor:` above. That asymmetry is
+        # Tempo's own -- this list names processors, that block configures them
+        # -- and a name spelled the other way is ignored without an error.
+        processors:
+          - local-blocks
+          - span-metrics
+          - service-graphs
+
+  # tempo.receivers is deliberately left at the chart default.
+  #
+  # templates/_ports.tpl dereferences
+  # .Values.tempo.receivers.jaeger.protocols.thrift_compact unconditionally, so
+  # `jaeger: null` to trim the unused receivers is a nil-pointer render error.
+  # Helm merges maps, so the idle Jaeger and OpenCensus listeners are harmless;
+  # only OTLP is actually written to, by the collector gateway.
+
+# WAL and not-yet-flushed blocks only; everything durable is in MinIO.
+persistence:
+  enabled: true
+  size: {{ k8s_observability_tempo_pvc_size }}
+  storageClassName: {{ k8s_observability_storage_class }}
+
+# Grafana queries Tempo natively, so the bundled Jaeger UI is dead weight.
+tempoQuery:
+  enabled: false

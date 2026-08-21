@@ -1,0 +1,54 @@
+---
+# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+#
+# The chart's defaults are unusable on a lab cluster: mode "distributed" with
+# replicas 16, a 16Gi memory request and a 500Gi volume. Each override below is
+# load-bearing.
+mode: standalone
+replicas: 1
+
+rootUser: "{{ k8s_observability_minio_root_user }}"
+rootPassword: "{{ k8s_observability_minio_root_password }}"
+
+# Recreate, not the chart's default RollingUpdate with maxSurge 100%: the PVC is
+# ReadWriteOnce on a WaitForFirstConsumer local-path volume, so a surge pod
+# scheduled onto the other worker could never bind it and the rollout would
+# deadlock on every upgrade.
+deploymentUpdate:
+  type: Recreate
+
+persistence:
+  enabled: true
+  size: {{ k8s_observability_minio_pvc_size }}
+  storageClass: {{ k8s_observability_storage_class }}
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 1Gi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+# Created by the chart's post-install,post-upgrade hook Job. Helm blocks on
+# hooks, so by the time the MinIO release returns these exist -- which is why
+# Tempo and Loki need no bucket-creation step of their own.
+buckets:
+  - name: {{ k8s_observability_tempo_bucket }}
+    policy: none
+    purge: false
+  - name: {{ k8s_observability_loki_chunks_bucket }}
+    policy: none
+    purge: false
+  - name: {{ k8s_observability_loki_ruler_bucket }}
+    policy: none
+    purge: false
+
+postJob:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

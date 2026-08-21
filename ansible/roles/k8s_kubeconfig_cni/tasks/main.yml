@@ -1,0 +1,155 @@
+---
+- name: Look up home directories of kubeconfig target users
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+  loop: "{{ k8s_kubeconfig_cni_kube_config_users }}"
+  register: k8s_kubeconfig_cni_getent_result
+
+# getent's result is exposed as ansible_facts.getent_passwd, but each loop
+# iteration replaces that fact wholesale rather than merging into it, so only
+# the last user in the loop would survive. Build our own map from the
+# per-item registered results instead.
+- name: Build user -> home directory map
+  ansible.builtin.set_fact:
+    k8s_kubeconfig_cni_user_homes: >-
+      {{ k8s_kubeconfig_cni_user_homes | default({}) |
+         combine({item.item: item.ansible_facts.getent_passwd[item.item][4]}) }}
+  loop: "{{ k8s_kubeconfig_cni_getent_result.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Ensure ~/.kube directory exists
+  ansible.builtin.file:
+    path: "{{ k8s_kubeconfig_cni_user_homes[item] }}/.kube"
+    state: directory
+    owner: "{{ item }}"
+    group: "{{ item }}"
+    mode: "0700"
+  loop: "{{ k8s_kubeconfig_cni_kube_config_users }}"
+
+- name: Copy admin.conf into users' kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ k8s_kubeconfig_cni_user_homes[item] }}/.kube/config"
+    remote_src: true
+    owner: "{{ item }}"
+    group: "{{ item }}"
+    mode: "0600"
+  loop: "{{ k8s_kubeconfig_cni_kube_config_users }}"
+
+# Worker nodes never run kubeadm init, so they have no /etc/kubernetes/admin.conf
+# of their own. Read it once here on the control plane and push it out below so
+# kubectl also works from the worker VMs.
+- name: Read admin.conf content for distribution to worker nodes
+  ansible.builtin.slurp:
+    src: /etc/kubernetes/admin.conf
+  register: k8s_kubeconfig_cni_admin_conf_slurp
+
+- name: Look up home directories of kubeconfig target users on worker nodes
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item.1 }}"
+  loop: "{{ groups['k8s_workers'] | product(k8s_kubeconfig_cni_kube_config_users) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
+  delegate_to: "{{ item.0 }}"
+  register: k8s_kubeconfig_cni_worker_getent_result
+
+# Same wholesale-replace problem as the control-plane lookup above, so this
+# builds its own (host, user) -> home directory map from the registered
+# results rather than trusting delegated ansible_facts.
+- name: Build worker user -> home directory map
+  ansible.builtin.set_fact:
+    k8s_kubeconfig_cni_worker_user_homes: >-
+      {{ k8s_kubeconfig_cni_worker_user_homes | default({}) |
+         combine({item.item.0 + '|' + item.item.1: item.ansible_facts.getent_passwd[item.item.1][4]}) }}
+  loop: "{{ k8s_kubeconfig_cni_worker_getent_result.results }}"
+  loop_control:
+    label: "{{ item.item.0 }}:{{ item.item.1 }}"
+
+- name: Ensure ~/.kube directory exists on worker nodes
+  ansible.builtin.file:
+    path: "{{ k8s_kubeconfig_cni_worker_user_homes[item.0 + '|' + item.1] }}/.kube"
+    state: directory
+    owner: "{{ item.1 }}"
+    group: "{{ item.1 }}"
+    mode: "0700"
+  loop: "{{ groups['k8s_workers'] | product(k8s_kubeconfig_cni_kube_config_users) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
+  delegate_to: "{{ item.0 }}"
+
+- name: Copy admin.conf into worker nodes' kubeconfig
+  ansible.builtin.copy:
+    content: "{{ k8s_kubeconfig_cni_admin_conf_slurp.content | b64decode }}"
+    dest: "{{ k8s_kubeconfig_cni_worker_user_homes[item.0 + '|' + item.1] }}/.kube/config"
+    owner: "{{ item.1 }}"
+    group: "{{ item.1 }}"
+    mode: "0600"
+  loop: "{{ groups['k8s_workers'] | product(k8s_kubeconfig_cni_kube_config_users) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
+  delegate_to: "{{ item.0 }}"
+
+# kubeadm init returns once static pods are created, but the API server can
+# take a few more seconds to start accepting requests.
+- name: Wait for the Kubernetes API server to become responsive
+  ansible.builtin.command: kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes
+  register: k8s_kubeconfig_cni_api_check
+  until: k8s_kubeconfig_cni_api_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Check for existing Tigera operator install
+  ansible.builtin.command: kubectl --kubeconfig=/etc/kubernetes/admin.conf get namespace tigera-operator
+  register: k8s_kubeconfig_cni_tigera_operator_ns
+  changed_when: false
+  failed_when: false
+
+# The operator manifest's CRDs are too large for `kubectl apply`'s
+# last-applied-configuration annotation; Tigera's own docs use `create`.
+- name: Install the Tigera operator
+  ansible.builtin.command: "kubectl --kubeconfig=/etc/kubernetes/admin.conf create -f {{ k8s_kubeconfig_cni_tigera_operator_url }}"
+  when: k8s_kubeconfig_cni_tigera_operator_ns.rc != 0
+
+# The API server needs a moment to register the operator's CRDs after
+# `create` returns; without this wait, applying custom-resources.yaml can
+# race ahead and fail with "no matches for kind ... ensure CRDs are
+# installed first".
+- name: Wait for Tigera operator CRDs to be established
+  ansible.builtin.command: >-
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf
+    wait --for=condition=Established --timeout=10s
+    crd/{{ item }}
+  loop:
+    - installations.operator.tigera.io
+    - apiservers.operator.tigera.io
+    - goldmanes.operator.tigera.io
+    - whiskers.operator.tigera.io
+  register: k8s_kubeconfig_cni_crd_wait
+  until: k8s_kubeconfig_cni_crd_wait.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  when: k8s_kubeconfig_cni_tigera_operator_ns.rc != 0
+
+- name: Copy Calico custom resources manifest
+  ansible.builtin.copy:
+    src: custom-resources.yaml
+    dest: "{{ k8s_kubeconfig_cni_custom_resources_remote_path }}"
+    mode: "0644"
+
+- name: Apply Calico custom resources
+  ansible.builtin.command: "kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f {{ k8s_kubeconfig_cni_custom_resources_remote_path }}"
+  register: k8s_kubeconfig_cni_apply_result
+  changed_when: "'unchanged' not in k8s_kubeconfig_cni_apply_result.stdout"
+
+- name: Wait for control-plane node to be Ready
+  ansible.builtin.command: >-
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf
+    wait --for=condition=Ready node/{{ inventory_hostname }}
+    --timeout={{ k8s_kubeconfig_cni_wait_for_ready_timeout }}s
+  changed_when: false
+  when: k8s_kubeconfig_cni_wait_for_ready

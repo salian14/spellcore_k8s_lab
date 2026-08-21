@@ -1,0 +1,190 @@
+---
+- name: Install prerequisite packages
+  ansible.builtin.apt:
+    name: "{{ vagrant_prerequisite_packages }}"
+    state: present
+    update_cache: true
+
+- name: Download HashiCorp GPG key
+  ansible.builtin.get_url:
+    url: "{{ vagrant_hashicorp_gpg_key_url }}"
+    dest: /tmp/hashicorp-gpg-key
+    mode: "0644"
+
+- name: Dearmor HashiCorp GPG key into apt keyring
+  ansible.builtin.command:
+    cmd: "gpg --dearmor --yes --output {{ vagrant_hashicorp_keyring }} /tmp/hashicorp-gpg-key"
+    creates: "{{ vagrant_hashicorp_keyring }}"
+
+- name: Add HashiCorp apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ vagrant_hashicorp_repo }}"
+    filename: hashicorp
+    state: present
+  register: vagrant_hashicorp_repo_added
+
+- name: Update apt cache after adding HashiCorp repo
+  ansible.builtin.apt:
+    update_cache: true
+  when: vagrant_hashicorp_repo_added.changed
+
+- name: Install Vagrant
+  ansible.builtin.apt:
+    name: "{{ vagrant_package }}"
+    state: present
+
+- name: Install libvirt/QEMU dependencies for vagrant-libvirt
+  ansible.builtin.apt:
+    name: "{{ vagrant_libvirt_packages }}"
+    state: present
+  when: vagrant_install_libvirt_provider
+
+- name: Add user to libvirt/kvm groups
+  ansible.builtin.user:
+    name: "{{ vagrant_user }}"
+    groups: "{{ vagrant_libvirt_groups }}"
+    append: true
+  when:
+    - vagrant_install_libvirt_provider
+    - vagrant_manage_libvirt_group_membership
+
+- name: Ensure libvirt storage pool directory exists
+  ansible.builtin.file:
+    path: "{{ vagrant_libvirt_storage_pool_path }}"
+    state: directory
+    owner: spellbound
+    group: spellbound
+    mode: "0755"
+  when: vagrant_install_libvirt_provider
+
+- name: Check existing libvirt storage pool definition
+  ansible.builtin.command: "virsh pool-dumpxml {{ vagrant_libvirt_storage_pool_name }}"
+  register: vagrant_libvirt_pool_xml
+  changed_when: false
+  failed_when: false
+  when: vagrant_install_libvirt_provider
+
+- name: Fail if storage pool already exists at a different path
+  ansible.builtin.fail:
+    msg: >-
+      libvirt storage pool '{{ vagrant_libvirt_storage_pool_name }}' already exists
+      and does not point at {{ vagrant_libvirt_storage_pool_path }}. Refusing to
+      redefine an existing pool automatically; migrate or remove it manually first.
+  when:
+    - vagrant_install_libvirt_provider
+    - vagrant_libvirt_pool_xml.rc == 0
+    - vagrant_libvirt_storage_pool_path not in vagrant_libvirt_pool_xml.stdout
+
+- name: Define libvirt storage pool
+  ansible.builtin.command: >-
+    virsh pool-define-as {{ vagrant_libvirt_storage_pool_name }} dir
+    --target {{ vagrant_libvirt_storage_pool_path }}
+  when:
+    - vagrant_install_libvirt_provider
+    - vagrant_libvirt_pool_xml.rc != 0
+
+- name: Build libvirt storage pool
+  ansible.builtin.command: "virsh pool-build {{ vagrant_libvirt_storage_pool_name }}"
+  when:
+    - vagrant_install_libvirt_provider
+    - vagrant_libvirt_pool_xml.rc != 0
+
+- name: Start libvirt storage pool
+  ansible.builtin.command: "virsh pool-start {{ vagrant_libvirt_storage_pool_name }}"
+  when:
+    - vagrant_install_libvirt_provider
+    - vagrant_libvirt_pool_xml.rc != 0
+
+- name: Set libvirt storage pool to autostart
+  ansible.builtin.command: "virsh pool-autostart {{ vagrant_libvirt_storage_pool_name }}"
+  when:
+    - vagrant_install_libvirt_provider
+    - vagrant_libvirt_pool_xml.rc != 0
+
+- name: Ensure custom VAGRANT_HOME directory exists
+  ansible.builtin.file:
+    path: "{{ vagrant_home }}"
+    state: directory
+    owner: "{{ vagrant_user }}"
+    group: "{{ vagrant_user }}"
+    mode: "0755"
+  when: vagrant_home | length > 0
+
+- name: Set VAGRANT_HOME in ~/.bashrc
+  ansible.builtin.lineinfile:
+    path: "~/.bashrc"
+    regexp: "^export VAGRANT_HOME="
+    line: "export VAGRANT_HOME={{ vagrant_home }}"
+    insertafter: EOF
+  become: true
+  become_user: "{{ vagrant_user }}"
+  when: vagrant_home | length > 0
+
+- name: Check installed vagrant plugins
+  ansible.builtin.command: vagrant plugin list
+  register: vagrant_plugin_list
+  changed_when: false
+  become: true
+  become_user: "{{ vagrant_user }}"
+  environment:
+    VAGRANT_HOME: "{{ vagrant_home if vagrant_home | length > 0 else omit }}"
+  when: vagrant_install_libvirt_provider or vagrant_install_hostmanager_plugin
+
+- name: Install vagrant-libvirt plugin
+  ansible.builtin.command: vagrant plugin install vagrant-libvirt
+  become: true
+  become_user: "{{ vagrant_user }}"
+  environment:
+    VAGRANT_HOME: "{{ vagrant_home if vagrant_home | length > 0 else omit }}"
+  when:
+    - vagrant_install_libvirt_provider
+    - "'vagrant-libvirt' not in vagrant_plugin_list.stdout"
+
+- name: Install vagrant-hostmanager plugin
+  ansible.builtin.command: vagrant plugin install vagrant-hostmanager
+  become: true
+  become_user: "{{ vagrant_user }}"
+  environment:
+    VAGRANT_HOME: "{{ vagrant_home if vagrant_home | length > 0 else omit }}"
+  when:
+    - vagrant_install_hostmanager_plugin
+    - "'vagrant-hostmanager' not in vagrant_plugin_list.stdout"
+
+- name: Look up home directory of vagrant_user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ vagrant_user }}"
+  when:
+    - vagrant_install_hostmanager_plugin
+    - vagrant_hostmanager_manage_sudoers
+
+- name: Set effective VAGRANT_HOME path used by vagrant-hostmanager
+  ansible.builtin.set_fact:
+    vagrant_hostmanager_vagrant_home: >-
+      {{ vagrant_home if vagrant_home | length > 0
+         else ansible_facts.getent_passwd[vagrant_user][4] + '/.vagrant.d' }}
+  when:
+    - vagrant_install_hostmanager_plugin
+    - vagrant_hostmanager_manage_sudoers
+
+- name: Deploy sudoers drop-in for passwordless vagrant-hostmanager updates
+  ansible.builtin.template:
+    src: vagrant_hostmanager.sudoers.j2
+    dest: /etc/sudoers.d/vagrant_hostmanager
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+  when:
+    - vagrant_install_hostmanager_plugin
+    - vagrant_hostmanager_manage_sudoers
+
+- name: Set default Vagrant provider in ~/.bashrc
+  ansible.builtin.lineinfile:
+    path: "~/.bashrc"
+    regexp: "^export VAGRANT_DEFAULT_PROVIDER="
+    line: "export VAGRANT_DEFAULT_PROVIDER={{ vagrant_default_provider }}"
+    insertafter: EOF
+  become: true
+  become_user: "{{ vagrant_user }}"
+  when: vagrant_install_libvirt_provider

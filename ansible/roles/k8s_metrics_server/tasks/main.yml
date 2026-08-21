@@ -1,0 +1,95 @@
+---
+- name: Wait for the Kubernetes API server to become responsive
+  ansible.builtin.command: "kubectl --kubeconfig={{ k8s_metrics_server_kubeconfig }} get nodes"
+  register: k8s_metrics_server_api_check
+  until: k8s_metrics_server_api_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Download the metrics-server manifest
+  ansible.builtin.get_url:
+    url: "{{ k8s_metrics_server_manifest_url }}"
+    dest: "{{ k8s_metrics_server_manifest_remote_path }}"
+    mode: "0644"
+
+# The manifest carries the ServiceAccount, RBAC, Service, Deployment and the
+# v1beta1.metrics.k8s.io APIService registration in one file.
+- name: Apply the metrics-server manifest
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_metrics_server_kubeconfig }}
+    apply -f {{ k8s_metrics_server_manifest_remote_path }}
+  register: k8s_metrics_server_apply
+  changed_when: "'unchanged' not in k8s_metrics_server_apply.stdout"
+
+# --- kubelet TLS ---
+#
+# Read-then-conditionally-patch, the same guard k8s_local_path_storage uses for
+# the default StorageClass annotation. Patching unconditionally would report
+# `changed` on every provision, and the `replace` op below rewrites the whole
+# args array so there is nothing to diff from the command's own output.
+- name: Read the metrics-server container arguments
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_metrics_server_kubeconfig }}
+    -n {{ k8s_metrics_server_namespace }}
+    get deployment {{ k8s_metrics_server_deployment }}
+    -o jsonpath={.spec.template.spec.containers[0].args}
+  register: k8s_metrics_server_current_args
+  changed_when: false
+  failed_when: false
+
+- name: Set the metrics-server container arguments
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_metrics_server_kubeconfig }}
+    -n {{ k8s_metrics_server_namespace }}
+    patch deployment {{ k8s_metrics_server_deployment }}
+    --type=json
+    -p {{ k8s_metrics_server_args_patch | to_json | quote }}
+  vars:
+    k8s_metrics_server_args_patch:
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value: "{{ k8s_metrics_server_args }}"
+  when:
+    - k8s_metrics_server_kubelet_insecure_tls
+    - "'--kubelet-insecure-tls' not in k8s_metrics_server_current_args.stdout"
+
+# Runs after the patch, so it waits on the patched ReplicaSet rather than
+# reporting the pre-patch one Available and moving on.
+- name: Wait for the metrics-server deployment to become available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_metrics_server_kubeconfig }}
+    -n {{ k8s_metrics_server_namespace }}
+    rollout status deployment/{{ k8s_metrics_server_deployment }}
+    --timeout={{ k8s_metrics_server_rollout_timeout }}s
+  changed_when: false
+
+# A Ready pod is not the same as a routable aggregated API: the apiserver has
+# to reach the Service and mark the APIService Available before metrics.k8s.io
+# resolves at all. Skipping this makes the `kubectl top` step below fail with a
+# confusing "the server could not find the requested resource".
+- name: Wait for the metrics.k8s.io APIService to become available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_metrics_server_kubeconfig }}
+    wait --for=condition=Available
+    apiservice/{{ k8s_metrics_server_apiservice }}
+    --timeout={{ k8s_metrics_server_apiservice_timeout }}s
+  changed_when: false
+
+# The real end-to-end check: the API can be Available while every scrape is
+# still failing TLS verification, in which case this stays non-zero and the
+# play fails here rather than reporting success on a broken metrics-server.
+# The retries cover the first --metric-resolution window, during which there is
+# legitimately nothing to serve yet.
+- name: Wait for node metrics to become available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_metrics_server_kubeconfig }} top nodes
+  register: k8s_metrics_server_top
+  until: k8s_metrics_server_top.rc == 0
+  retries: "{{ k8s_metrics_server_top_retries | int }}"
+  delay: "{{ k8s_metrics_server_top_delay | int }}"
+  changed_when: false
+
+- name: Report the node resource metrics
+  ansible.builtin.debug:
+    msg: "{{ k8s_metrics_server_top.stdout_lines }}"

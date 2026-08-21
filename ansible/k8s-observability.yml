@@ -1,0 +1,38 @@
+---
+# Stands up an OTLP telemetry backend -- Grafana, Tempo for traces, Loki for
+# logs, MinIO as the shared S3 object store, and an OpenTelemetry collector
+# gateway -- in its own `observability` namespace.
+#
+# Runs after k8s-cluster-bootstrap.yml: the cluster has to exist, and the
+# storage prerequisites here have to be in place before any chart's PVC is
+# created.
+#
+# Manual invocation, from the repo root:
+#   ansible-playbook \
+#     -i .vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory \
+#     ansible/k8s-observability.yml
+
+# Targets the node groups by name rather than `all` for the same reason
+# k8s-registry-trust.yml does: inventory.ini's only host is the workstation.
+# This is the one play that has to touch every node -- the root logical volume
+# is per-node, and local-path persistent volumes are directories on whichever
+# node the consuming pod lands on.
+- name: Grow the node root filesystems into the unallocated volume group space
+  hosts: k8s_control:k8s_workers
+  become: true
+  roles:
+    - role: k8s_node_storage_expand
+      when: k8s_node_storage_expand_enabled | default(true)
+
+# Everything below is cluster-scoped, so it runs once from the control plane
+# against admin.conf. helm_cli comes first because k8s_observability drives the
+# helm binary it installs; k8s_local_path_storage comes next because the cluster
+# has no StorageClass at all and every chart here claims a volume.
+- name: Deploy the observability backend
+  hosts: k8s_control
+  become: true
+  roles:
+    - helm_cli
+    - k8s_local_path_storage
+    - role: k8s_observability
+      when: k8s_observability_enabled | default(true)
