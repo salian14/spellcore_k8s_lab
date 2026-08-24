@@ -287,6 +287,12 @@ application ships its own observability alongside its own manifests. The seven
 bundled cluster dashboards use exactly that mechanism — see
 [`ansible/README.md`](ansible/README.md#dashboards-and-alerts).
 
+Deploying an application into this cluster and want its telemetry in Grafana?
+[`docs/observability-for-developers.md`](docs/observability-for-developers.md) is
+the how-to: the `OTEL_*` block to set, what arrives for free, how to query each
+signal, and how to ship your own dashboards and alert rules. Runnable manifests
+are in [`examples/observability/`](examples/observability/).
+
 ## Customizing
 
 - **Node count, names, IPs, CPU, memory** — the `NODES` array at the top of the
