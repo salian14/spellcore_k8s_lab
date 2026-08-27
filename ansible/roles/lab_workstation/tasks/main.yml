@@ -57,6 +57,32 @@
     mode: "0755"
   when: lab_workstation_install_libvirt
 
+# The dmacvicar/libvirt provider declares VM disks as <disk type='volume'>
+# (a pool/volume reference), which Ubuntu's virt-aa-helper cannot resolve
+# into file rules -- so the per-domain AppArmor profile it generates omits
+# the root disk and its backing image, and QEMU dies with "Permission
+# denied" on domain start. Grant the pool path in the libvirt-qemu
+# abstraction instead; the drop-in is picked up when each domain's profile
+# is compiled (at every domain start), so no daemon restart is needed.
+- name: Create AppArmor libvirt-qemu drop-in directory
+  ansible.builtin.file:
+    path: /etc/apparmor.d/abstractions/libvirt-qemu.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: lab_workstation_install_libvirt
+
+- name: Allow QEMU access to the storage pool path via AppArmor drop-in
+  ansible.builtin.copy:
+    content: |
+      "{{ lab_workstation_storage_pool_path }}/**" rwk,
+    dest: /etc/apparmor.d/abstractions/libvirt-qemu.d/storage-pool
+    owner: root
+    group: root
+    mode: "0644"
+  when: lab_workstation_install_libvirt
+
 - name: Check existing libvirt storage pool definition
   ansible.builtin.command: "virsh pool-dumpxml {{ lab_workstation_storage_pool_name }}"
   register: lab_workstation_pool_xml
