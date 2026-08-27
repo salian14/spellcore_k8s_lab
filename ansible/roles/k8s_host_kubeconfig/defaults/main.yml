@@ -27,8 +27,8 @@ k8s_host_kubeconfig_set_current: true
 # admin.conf already points at", which is k8s-control's private-network IP
 # (kubeadm writes --apiserver-advertise-address there, and puts it in the API
 # server cert's SANs). That address is directly routable from the host over
-# Vagrant's private network, so no tunnel or port-forward is involved. Set
-# this only if you front the API server with something else.
+# the lab network, so no tunnel or port-forward is involved. Set this only if
+# you front the API server with something else.
 k8s_host_kubeconfig_server: ""
 
 # One-time copy of the kubeconfig taken the first time this role modifies it,

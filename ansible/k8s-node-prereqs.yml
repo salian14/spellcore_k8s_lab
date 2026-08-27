@@ -3,4 +3,5 @@
   hosts: all
   become: true
   roles:
+    - k8s_node_hosts
     - k8s_node_prereqs

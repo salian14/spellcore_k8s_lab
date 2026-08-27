@@ -37,9 +37,8 @@ k8s_metrics_server_apiservice: v1beta1.metrics.k8s.io
 #
 # The alternative is serverTLSBootstrap: true in the kubelet config plus
 # approving a kubelet-serving CSR per node on every certificate rotation. On an
-# isolated Vagrant private network that buys nothing, and it would add a manual
-# step to `vagrant up`. Do not carry this setting into anything that isn't a
-# lab.
+# isolated lab network that buys nothing, and it would add a manual step to
+# `terraform apply`. Do not carry this setting into anything that isn't a lab.
 k8s_metrics_server_kubelet_insecure_tls: true
 
 # Replaced wholesale rather than appended, because `kubectl patch --type=json`
@@ -50,11 +49,10 @@ k8s_metrics_server_kubelet_insecure_tls: true
 # dropped here.
 #
 # --kubelet-preferred-address-types is left exactly as upstream ships it.
-# InternalIP leads, and on this cluster the node InternalIPs are the private
-# network addresses (192.168.56.10/.11/.12), not the Vagrant NAT 10.0.2.15 they
-# would be if kubelet had picked the default-route interface -- so scrapes
-# reach the right host. Verify with `kubectl get nodes -o wide` before changing
-# this ordering.
+# InternalIP leads, and on this cluster the node InternalIPs are the lab
+# network addresses (192.168.56.10/.11/.12) -- each node's single NIC and
+# default-route interface -- so scrapes reach the right host. Verify with
+# `kubectl get nodes -o wide` before changing this ordering.
 k8s_metrics_server_args:
   - --cert-dir=/tmp
   - --secure-port=10250

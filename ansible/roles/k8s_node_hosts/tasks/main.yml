@@ -1,0 +1,14 @@
+---
+# Replaces the guest half of vagrant-hostmanager: every node can resolve every
+# other node by name. Writes only a delimited block, leaving the rest of
+# /etc/hosts alone -- including the registry.lab entry that
+# containerd_registry_trust owns (that name points at the host, so it can't
+# come from the node list here).
+- name: Sync lab node names into /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} SPELLCORE LAB NODES"
+    block: |
+      {% for h in (groups['k8s_control'] + groups['k8s_workers']) | unique %}
+      {{ hostvars[h].ansible_host }} {{ h }}
+      {% endfor %}

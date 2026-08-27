@@ -18,11 +18,10 @@ containerd_registry_trust_capabilities:
 containerd_registry_trust_skip_verify: false
 
 # --- name resolution on the node ---
-# vagrant-hostmanager runs with manage_guest = true, so a guest's /etc/hosts
-# carries every node's name -- but only those. hostmanager maps names to
-# machines defined in the Vagrantfile, and registry.lab points at the host, so
-# it can't provide this one. Written here instead. See ../README.md,
-# "Networking".
+# The k8s_node_hosts role writes every node's name into each guest's
+# /etc/hosts -- but only those. It maps names to nodes in the inventory, and
+# registry.lab points at the host, so it can't provide this one. Written here
+# instead. See ../README.md, "Networking".
 containerd_registry_trust_manage_hosts_entry: true
 containerd_registry_trust_hosts_file: /etc/hosts
 

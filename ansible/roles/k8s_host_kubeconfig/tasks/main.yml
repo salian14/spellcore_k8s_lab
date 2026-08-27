@@ -1,6 +1,6 @@
 ---
 # Only the slurp below runs on k8s-control; everything else is delegated to
-# localhost, meaning the workstation that invoked `vagrant up`. The play sets
+# localhost, meaning the workstation that invoked `terraform apply`. The play sets
 # `become: true` for the slurp's sake (admin.conf is root-only), so every
 # delegated task turns it back off to act as the workstation's own user.
 

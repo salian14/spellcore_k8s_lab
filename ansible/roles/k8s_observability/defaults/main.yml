@@ -56,14 +56,14 @@ k8s_observability_prometheus_chart_version: "29.25.0" # appVersion v3.13.2
 
 # --- credentials ---
 # Plaintext on purpose. There is no vault in this repo, and this cluster sits on
-# an isolated Vagrant private network reachable only from the workstation -- the
+# an isolated lab network reachable only from the workstation -- the
 # same posture as lab_registry_scheme: "http" in group_vars/all.yml. To use
 # different credentials, copy host_vars/k8s-control.yml.example to
 # host_vars/k8s-control.yml and override them there rather than editing this
 # file. Do not carry this pattern into anything that isn't a lab.
 #
 # MinIO's chart GENERATES these when left empty, which would silently rotate
-# them on the second `vagrant provision` and break Tempo and Loki with S3 auth
+# them on the second provisioning run and break Tempo and Loki with S3 auth
 # errors. They must be set explicitly.
 k8s_observability_minio_root_user: lab-minio
 k8s_observability_minio_root_password: lab-observability

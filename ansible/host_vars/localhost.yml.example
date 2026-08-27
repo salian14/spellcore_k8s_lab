@@ -1,16 +1,10 @@
 ---
-# Copy this file to host_vars/localhost.yml (untracked/local) and uncomment
-# whatever you want to override. Anything left commented keeps the role's
-# default from roles/vagrant/defaults/main.yml.
+# Copy this file to host_vars/localhost.yml and uncomment whatever you want to
+# override. Anything left commented keeps the role's default from
+# roles/lab_workstation/defaults/main.yml.
 
-# vagrant_user: spellbound
+# lab_workstation_user: spellbound
 
-# --- libvirt provider ---
-# vagrant_install_libvirt_provider: true
-# vagrant_libvirt_storage_pool_path: /var/lib/libvirt/images
-# vagrant_home: ""
-
-# --- vagrant-hostmanager (host+guest /etc/hosts sync) ---
-# vagrant_install_hostmanager_plugin: true
-# vagrant_hostmanager_manage_sudoers: true
-# vagrant_hostmanager_sudo_group: sudo
+# --- libvirt/QEMU stack ---
+# lab_workstation_install_libvirt: true
+# lab_workstation_storage_pool_path: /var/lib/libvirt/images

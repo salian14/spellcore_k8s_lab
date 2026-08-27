@@ -45,7 +45,7 @@ most people arrive with and it is worth un-learning early.
 
 Prometheus is the one component with no object-storage backend, so its 20Gi
 volume is the only copy of the metrics. Everything sits on `local-path` volumes,
-which means `vagrant destroy` takes all of it.
+which means `terraform destroy` takes all of it.
 
 ## Wiring an application up
 
@@ -646,7 +646,7 @@ Roughly in the order worth checking.
   remove the rule — see the `deleteRules` block in [Alerts](#alerts).
 - **Telemetry vanished after a restart.** `local-path` volumes are directories on
   whichever node the pod first landed on, so those pods can never be rescheduled
-  elsewhere — and `vagrant destroy` takes the lot.
+  elsewhere — and `terraform destroy` takes the lot.
 
 ## See also
 

@@ -5,12 +5,10 @@
 # `-i inventory.ini` run is a no-op instead of an attempt to reconfigure your
 # own machine's containerd.
 #
-# Vagrant runs this automatically (see ../Vagrantfile). To re-run it
-# by hand against the running VMs:
+# Terraform runs this automatically (see ../terraform/provision.tf). To re-run
+# it by hand against the running VMs, from the repo root:
 #
-#   ansible-playbook \
-#     -i .vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory \
-#     k8s-registry-trust.yml
+#   ansible-playbook -i terraform/inventory.ini ansible/k8s-registry-trust.yml
 - name: Trust the lab registry on the Kubernetes nodes
   hosts: k8s_control:k8s_workers
   become: true

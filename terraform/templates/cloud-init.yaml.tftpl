@@ -1,0 +1,23 @@
+#cloud-config
+hostname: ${hostname}
+fqdn: ${hostname}
+preserve_hostname: false
+# Only the 127.0.1.1 self-entry; the other nodes' entries are written by the
+# k8s_node_hosts ansible role, and registry.lab by containerd_registry_trust.
+manage_etc_hosts: localhost
+users:
+  - name: ${user}
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+%{ for key in ssh_keys ~}
+      - ${key}
+%{ endfor ~}
+packages:
+  - qemu-guest-agent
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+# No growpart/resizefs config needed: cloud-init's defaults already expand the
+# root partition and filesystem to the full virtual disk on first boot.

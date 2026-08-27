@@ -1,0 +1,38 @@
+---
+# User granted libvirt/kvm group membership and ownership of the storage pool
+# directory -- the one who runs `terraform apply`.
+lab_workstation_user: "{{ ansible_user_id }}"
+
+lab_workstation_prerequisite_packages:
+  - curl
+  - gpg
+
+lab_workstation_hashicorp_gpg_key_url: https://apt.releases.hashicorp.com/gpg
+lab_workstation_hashicorp_keyring: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+lab_workstation_hashicorp_repo: "deb [signed-by={{ lab_workstation_hashicorp_keyring }}] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main"
+
+lab_workstation_terraform_package: terraform
+
+# Set to false to install terraform only, without the libvirt/QEMU stack.
+lab_workstation_install_libvirt: true
+
+lab_workstation_libvirt_packages:
+  - qemu-system-x86
+  - libvirt-daemon-system
+  - libvirt-clients
+  - dnsmasq-base
+  - bridge-utils
+
+# Group membership needed for the user to talk to libvirtd without sudo --
+# which is also what lets the dmacvicar/libvirt provider use qemu:///system.
+lab_workstation_manage_libvirt_group_membership: true
+lab_workstation_libvirt_groups:
+  - libvirt
+  - kvm
+
+# libvirt storage pool that backs the lab's VM disk images (terraform's `pool`
+# variable). Left at the libvirt defaults, this is a no-op; if the pool
+# doesn't exist yet it's created at this path, if it already exists at a
+# different path the role refuses to touch it rather than risk data loss.
+lab_workstation_storage_pool_name: default
+lab_workstation_storage_pool_path: /var/lib/libvirt/images
