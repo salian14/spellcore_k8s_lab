@@ -1,4 +1,14 @@
-# Vagrant's per-project machine state. Holds the per-machine SSH private keys
-# and the inventory Vagrant regenerates on every provision (with absolute host
-# paths baked in) -- none of it belongs in the repo.
+# Terraform: local state, provider cache, and generated artifacts (the Ansible
+# inventory and the lab SSH keypair) -- all machine-local, none of it belongs
+# in the repo. The dependency lock file (.terraform.lock.hcl) IS committed.
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/crash.log
+terraform/inventory.ini
+terraform/artifacts/
+*.auto.tfvars
+
+# Leftover Vagrant machine state from before the Terraform migration; can be
+# deleted (and this entry with it) once the old VMs are destroyed.
 .vagrant/

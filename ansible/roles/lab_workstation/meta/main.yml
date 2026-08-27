@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: lab_workstation
+  description: Prepare a workstation to run the lab -- Terraform (HashiCorp apt repo) plus the libvirt/QEMU stack and storage pool
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

@@ -130,7 +130,7 @@
 # prints the same output, and Helm 3 mints a NEW REVISION on every invocation --
 # so neither rc nor revision number can distinguish real work from a no-op, and
 # without the gate this role would report `changed` on every single
-# `vagrant provision` and push a pointless revision each time.
+# provisioning re-run and push a pointless revision each time.
 #
 # Credentials are passed only through the rendered values files, never via
 # `--set`, which would expose them in ps output and in Ansible's task log.

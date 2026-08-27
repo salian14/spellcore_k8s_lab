@@ -1,16 +1,16 @@
 ---
 # Lab network facts shared by every play in this repo. This file is the source
-# of truth for addresses on the Ansible side; the NODES array in
-# ../Vagrantfile wins for node addresses if the two ever disagree.
-# The full map -- which network is which, and why only one of them is safe to
-# use -- is in ../README.md under "Networking".
+# of truth for addresses on the Ansible side; the `nodes` map in
+# ../terraform/variables.tf wins for node addresses if the two ever disagree.
+# The full map is in ../README.md under "Networking".
 
-# The host's address on the lab network (virbr2), reachable from every node.
+# The host's address on the lab network (the NAT bridge), reachable from every
+# node. Must match `host_ip` in ../terraform/variables.tf.
 lab_host_ip: "192.168.56.1"
 
-# The local OCI registry the cluster pulls from. hostmanager syncs the node
-# names into each guest's /etc/hosts, but it only knows about machines defined
-# in the Vagrantfile and this name points at the host -- so
+# The local OCI registry the cluster pulls from. The k8s_node_hosts role syncs
+# the node names into each guest's /etc/hosts, but it only knows about nodes in
+# the inventory and this name points at the host -- so
 # containerd_registry_trust writes it into /etc/hosts on each node itself.
 #
 # Use the name, not localhost: it resolves to the same address on the host and

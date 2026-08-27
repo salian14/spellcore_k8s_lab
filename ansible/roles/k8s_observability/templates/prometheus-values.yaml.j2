@@ -31,9 +31,14 @@ server:
 
   # Rendered into prometheus.yml's top-level `otlp:` block by templates/cm.yaml.
   otlp:
-    # OTel metric names are dotted (http.server.duration); Prometheus names are
-    # underscored. This strategy does the translation and keeps the _total /
-    # _seconds unit suffixes, which is what PromQL and Grafana expect.
+    # Keeps OTel's dotted names as they are (http.server.duration stays dotted)
+    # and appends the _total / _seconds unit suffixes. It does NOT escape dots to
+    # underscores -- that is UnderscoreEscapingWithSuffixes, the chart default.
+    # So stored series look like http.server.request.duration_seconds_bucket, and
+    # querying them needs Prometheus 3's UTF-8 syntax, with the name quoted
+    # inside the braces: {"http.server.request.duration_seconds_bucket"}.
+    # Write the underscored name out of habit and the query matches nothing,
+    # with no error. See docs/observability-for-developers.md#metrics.
     translation_strategy: NoUTF8EscapingWithSuffixes
     # OTLP resource attributes are otherwise flattened into a single
     # `target_info` metric and are NOT queryable as labels. Promoting these

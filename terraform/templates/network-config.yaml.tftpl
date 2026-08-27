@@ -1,0 +1,12 @@
+version: 2
+ethernets:
+  lab0:
+    match:
+      macaddress: "${mac}"
+    set-name: lab0
+    addresses: ["${ip}/24"]
+    routes:
+      - to: default
+        via: "${gw}"
+    nameservers:
+      addresses: [1.1.1.1, 8.8.8.8]

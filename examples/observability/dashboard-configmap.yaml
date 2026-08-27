@@ -1,0 +1,318 @@
+---
+# A dashboard shipped by an application, in the application's own namespace.
+#
+# Grafana's `grafana-sc-dashboard` sidecar watches every namespace for ConfigMaps
+# carrying the `grafana_dashboard` label, writes them into Grafana's provisioning
+# directory and reloads. Nothing in the k8s_observability role changes.
+#
+# Apply with --server-side once the JSON gets large: a client-side apply also
+# stores the whole object in a last-applied-configuration annotation, which
+# doubles it against the 1MiB ConfigMap limit.
+#
+#   kubectl -n my-namespace apply --server-side -f dashboard-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-app-dashboards
+  labels:
+    # Presence is what matches -- the sidecar never compares the value.
+    grafana_dashboard: "1"
+  annotations:
+    # The Grafana folder this lands in. Omit and it goes to General.
+    grafana_folder: "Applications"
+data:
+  # One dashboard per ConfigMap: the object limit is 1MiB and real dashboards
+  # get large.
+  my-app-overview.json: |
+    {
+      "id": null,
+      "uid": "my-app-overview",
+      "title": "My App / Overview",
+      "tags": [
+        "example",
+        "application"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "editable": false,
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "service",
+            "label": "Service",
+            "type": "query",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "prometheus"
+            },
+            "query": {
+              "qryType": 1,
+              "query": "label_values(traces_spanmetrics_calls_total, service)",
+              "refId": "service-variable"
+            },
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": {
+              "text": [
+                "All"
+              ],
+              "value": [
+                "$__all"
+              ]
+            }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Request rate (from spans)",
+          "id": 1,
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (service) (rate(traces_spanmetrics_calls_total{service=~\"$service\"}[5m]))",
+              "legendFormat": "{{service}}",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "description": "Derived by Tempo's metrics-generator from your spans. No instrumentation beyond emitting spans at all. Note the label is `service`, not `service.name`."
+        },
+        {
+          "type": "timeseries",
+          "title": "p95 latency (from spans)",
+          "id": 2,
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.95, sum by (service, le) (rate(traces_spanmetrics_latency_bucket{service=~\"$service\"}[5m])))",
+              "legendFormat": "{{service}}",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "description": "traces_spanmetrics_latency_* is a seconds-based histogram."
+        },
+        {
+          "type": "stat",
+          "title": "Error ratio (from spans)",
+          "id": 3,
+          "gridPos": {
+            "x": 0,
+            "y": 8,
+            "w": 6,
+            "h": 6
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "STATUS_CODE_ERROR spans over all spans.",
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(traces_spanmetrics_calls_total{service=~\"$service\",status_code=\"STATUS_CODE_ERROR\"}[5m])) / sum(rate(traces_spanmetrics_calls_total{service=~\"$service\"}[5m]))",
+              "legendFormat": "error ratio",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.01
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.05
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Application metric pushed over OTLP",
+          "id": 4,
+          "gridPos": {
+            "x": 6,
+            "y": 8,
+            "w": 18,
+            "h": 6
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (\"service.name\") (rate({\"http.server.request.duration_seconds_count\"}[5m]))",
+              "legendFormat": "{{service.name}}",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "description": "OTLP metric names and resource attributes keep their dots, so this needs Prometheus 3's UTF-8 quoted syntax. Swap the metric name for one of your own -- list what is actually stored with: curl -s http://192.168.56.10:30090/api/v1/label/__name__/values"
+        },
+        {
+          "type": "logs",
+          "title": "Logs",
+          "id": 5,
+          "gridPos": {
+            "x": 0,
+            "y": 14,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Loki indexes only `service_name`. Everything else is structured metadata, filtered after the stream selector with `|`.",
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{service_name=~\"$service\"}",
+              "queryType": "range"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending"
+          }
+        }
+      ]
+    }

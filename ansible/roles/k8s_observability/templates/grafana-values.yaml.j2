@@ -9,7 +9,7 @@ adminPassword: "{{ k8s_observability_grafana_admin_password }}"
 
 # NodePort because this cluster has no ingress controller and no MetalLB, so a
 # LoadBalancer Service would sit <pending> forever. Answers on all three node
-# IPs over the Vagrant private network.
+# IPs over the lab network.
 service:
   type: NodePort
   nodePort: {{ k8s_observability_grafana_node_port }}

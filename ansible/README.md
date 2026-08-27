@@ -1,53 +1,54 @@
 # spellcore_k8s_lab — Ansible
 
-Ansible playbook that installs [Vagrant](https://www.vagrantup.com/) from HashiCorp's
-official apt repository, along with the `vagrant-libvirt` provider and its
-QEMU/KVM dependencies.
+Ansible playbook that prepares the workstation to run the lab: installs
+[Terraform](https://www.terraform.io/) from HashiCorp's official apt
+repository, along with the QEMU/KVM/libvirt stack and storage pool the
+`dmacvicar/libvirt` provider builds the VMs on.
 
-Also includes the `k8s_node_prereqs` role, which prepares the
-`spellcore_k8s_lab` guest VMs for `kubeadm` (swap off, kernel/sysctl settings,
-containerd, kubeadm/kubelet/kubectl), and the `k8s_control_plane_init` /
-`k8s_kubeconfig_cni` / `k8s_cluster_join` / `k8s_metrics_server` /
-`k8s_host_kubeconfig` roles, which bootstrap the actual cluster on top of that
-(`kubeadm init`, kubectl + Calico CNI, `kubeadm join`, metrics-server so
-`kubectl top` works) and then give your workstation a `kubectl`
-context pointed at it — see their own sections below. Unlike the `vagrant`
-role, none of these are run from this directory with `ansible-playbook`;
-Vagrant's built-in `ansible` provisioner invokes them automatically.
+Also includes the `k8s_node_hosts` and `k8s_node_prereqs` roles, which prepare
+the `spellcore_k8s_lab` guest VMs for `kubeadm` (node names in `/etc/hosts`,
+swap off, kernel/sysctl settings, containerd, kubeadm/kubelet/kubectl), and
+the `k8s_control_plane_init` / `k8s_kubeconfig_cni` / `k8s_cluster_join` /
+`k8s_metrics_server` / `k8s_host_kubeconfig` roles, which bootstrap the actual
+cluster on top of that (`kubeadm init`, kubectl + Calico CNI, `kubeadm join`,
+metrics-server so `kubectl top` works) and then give your workstation a
+`kubectl` context pointed at it — see their own sections below. Unlike the
+`lab_workstation` role, none of these are run from this directory with
+`ansible-playbook`; `terraform apply` invokes them automatically (see
+`../terraform/provision.tf`).
 
 Plus `containerd_registry_trust`, which lets the nodes pull from the lab
-registry at `registry.lab:5000` — also invoked by Vagrant, see
+registry at `registry.lab:5000` — also invoked by Terraform, see
 [its section](#containerd_registry_trust-role) below.
 
-Finally the `k8s_node_storage_expand` / `helm_cli` / `k8s_local_path_storage` /
-`k8s_observability` roles, which grow the node root volumes, install Helm and a
-default StorageClass, and deploy the Grafana/Tempo/Loki/Prometheus/MinIO/OTel
-telemetry backend — see [Observability roles](#observability-roles). Vagrant
-invokes these too.
+Finally the `helm_cli` / `k8s_local_path_storage` / `k8s_observability` roles,
+which install Helm and a default StorageClass and deploy the
+Grafana/Tempo/Loki/Prometheus/MinIO/OTel telemetry backend — see
+[Observability roles](#observability-roles). Terraform invokes these too.
 
 ## Layout
 
 ```
 .
 └── ansible/
-    ├── inventory.ini            # example inventory (localhost by default), used by the vagrant role
-    ├── playbook.yml             # entry point for the vagrant role
-    ├── k8s-node-prereqs.yml     # entry point for the k8s_node_prereqs role, invoked by Vagrant's ansible provisioner
-    ├── k8s-cluster-bootstrap.yml  # entry point for the five cluster-bootstrap roles below, invoked by Vagrant's ansible provisioner
-    ├── k8s-registry-trust.yml   # entry point for containerd_registry_trust, invoked by Vagrant's ansible provisioner
-    ├── k8s-observability.yml    # entry point for the four observability roles below, invoked by Vagrant's ansible provisioner
+    ├── inventory.ini            # example inventory (localhost by default), used by the lab_workstation role
+    ├── playbook.yml             # entry point for the lab_workstation role
+    ├── k8s-node-prereqs.yml     # entry point for k8s_node_hosts + k8s_node_prereqs, invoked by terraform apply
+    ├── k8s-cluster-bootstrap.yml  # entry point for the five cluster-bootstrap roles below, invoked by terraform apply
+    ├── k8s-registry-trust.yml   # entry point for containerd_registry_trust, invoked by terraform apply
+    ├── k8s-observability.yml    # entry point for the three observability roles below, invoked by terraform apply
     ├── group_vars/
     │   └── all.yml              # lab network/registry addresses shared by every play
     ├── host_vars/
-    │   ├── localhost.yml.example    # copy to localhost.yml to override the vagrant role's defaults
+    │   ├── localhost.yml.example    # copy to localhost.yml to override the lab_workstation role's defaults
     │   └── k8s-control.yml.example  # copy to k8s-control.yml to override observability credentials/ports/retention
     └── roles/
-        ├── vagrant/
+        ├── lab_workstation/
         │   ├── defaults/main.yml   # all configurable variables
         │   ├── meta/main.yml
-        │   ├── tasks/main.yml
-        │   └── templates/
-        │       └── vagrant_hostmanager.sudoers.j2
+        │   └── tasks/main.yml
+        ├── k8s_node_hosts/
+        │   └── tasks/main.yml
         ├── k8s_node_prereqs/
         │   ├── defaults/main.yml   # all configurable variables
         │   ├── meta/main.yml
@@ -84,10 +85,6 @@ invokes these too.
         │   ├── tasks/main.yml
         │   └── templates/
         │       └── hosts.toml.j2   # certs.d entry for the lab registry
-        ├── k8s_node_storage_expand/
-        │   ├── defaults/main.yml   # all configurable variables
-        │   ├── meta/main.yml
-        │   └── tasks/main.yml
         ├── helm_cli/
         │   ├── defaults/main.yml   # all configurable variables
         │   ├── meta/main.yml
@@ -108,7 +105,8 @@ invokes these too.
 ```
 
 `group_vars/all.yml` sits next to the playbooks, so every play here picks it
-up — including the ones Vagrant runs against its own generated inventory. It
+up — including the ones Terraform runs against the inventory it generates at
+`../terraform/inventory.ini`. It
 holds the lab addresses (`lab_host_ip`, `lab_registry_host`,
 `lab_registry_port`, …) that `containerd_registry_trust` defaults to, so the
 endpoint is stated once rather than in the role. The full network map is in
@@ -124,10 +122,7 @@ endpoint is stated once rather than in the role. The full network map is in
 
 No Ansible collections are required — the role only uses modules that ship
 with `ansible-core` (`apt`, `apt_repository`, `get_url`, `command`, `user`,
-`file`, `lineinfile`, `getent`, `template`).
-
-Deploying the sudoers drop-in also requires `visudo` (part of the `sudo`
-package) on the target host, used to validate the file before it's written.
+`file`).
 
 ## Quick start
 
@@ -140,8 +135,7 @@ cd ansible
 ### Run against the local machine
 
 `inventory.ini` already defines a `localhost` entry using
-`ansible_connection=local`, matching how `install_vagrant.md` was originally
-run (directly on the workstation):
+`ansible_connection=local`:
 
 ```bash
 ansible-playbook -i inventory.ini playbook.yml --ask-become-pass
@@ -150,10 +144,10 @@ ansible-playbook -i inventory.ini playbook.yml --ask-become-pass
 ### Run against a remote host
 
 Edit `inventory.ini` (or pass `-i` to a different inventory file) and add a
-host under `[vagrant_hosts]`:
+host under `[workstation]`:
 
 ```ini
-[vagrant_hosts]
+[workstation]
 workstation ansible_host=192.168.1.50 ansible_user=spellbound
 ```
 
@@ -170,9 +164,9 @@ ansible-playbook -i inventory.ini playbook.yml --check --diff
 ```
 
 Note: the `--check` run will report false positives for the `command`
-tasks (GPG dearmor, libvirt pool setup, plugin install/list) since Ansible
-can't simulate arbitrary commands — read the `apt`/`file`/`lineinfile` diffs
-and treat command-task output as informational only.
+tasks (GPG dearmor, libvirt pool setup) since Ansible can't simulate
+arbitrary commands — read the `apt`/`file` diffs and treat command-task
+output as informational only.
 
 ## What the role does
 
@@ -181,73 +175,49 @@ and treat command-task output as informational only.
    `/usr/share/keyrings/hashicorp-archive-keyring.gpg`.
 3. Adds the HashiCorp apt repository (`apt.releases.hashicorp.com`), signed
    with that keyring, then refreshes the apt cache.
-4. Installs the `vagrant` package.
-5. If `vagrant_install_libvirt_provider` is true (default):
-   - Installs QEMU/libvirt build dependencies (`qemu-system-x86`,
-     `libvirt-daemon-system`, `libvirt-dev`, etc.).
-   - Adds the target user to the `libvirt` and `kvm` groups.
+4. Installs the `terraform` package.
+5. If `lab_workstation_install_libvirt` is true (default):
+   - Installs the QEMU/libvirt packages (`qemu-system-x86`,
+     `libvirt-daemon-system`, `libvirt-clients`, etc.).
+   - Adds the target user to the `libvirt` and `kvm` groups — which is what
+     lets both `virsh` and the `dmacvicar/libvirt` Terraform provider talk to
+     `qemu:///system` without sudo.
    - Ensures the libvirt storage pool used for VM disk images exists at the
      configured path (creates/builds/starts/autostarts it if missing; if a
      pool with that name already exists at a *different* path, the task
      fails rather than risk moving/losing existing VM storage).
-   - Optionally sets `VAGRANT_HOME` if `vagrant_home` is set, so Vagrant's
-     boxes/plugins/machine state live somewhere other than `~/.vagrant.d`.
-   - Installs the `vagrant-libvirt` plugin for the target user (idempotent:
-     checks `vagrant plugin list` first).
-   - Appends `export VAGRANT_DEFAULT_PROVIDER=libvirt` to that user's
-     `~/.bashrc`.
-6. If `vagrant_install_hostmanager_plugin` is true (default):
-   - Installs the `vagrant-hostmanager` plugin for the target user
-     (idempotent, same `vagrant plugin list` check as above). This plugin
-     keeps `/etc/hosts` on the host and every guest in sync with all
-     machines' names/IPs — it's what makes guest hostnames resolvable from
-     your workstation. It still needs `config.hostmanager.enabled` and
-     `config.hostmanager.manage_host` set in the project's `Vagrantfile`
-     (already done in `../Vagrantfile`).
-   - If `vagrant_hostmanager_manage_sudoers` is also true (default), deploys
-     `/etc/sudoers.d/vagrant_hostmanager`, a `visudo`-validated drop-in that
-     grants `vagrant_hostmanager_sudo_group` passwordless sudo for the one
-     `cp` command vagrant-hostmanager uses to update the host's
-     `/etc/hosts`. Without this, every `vagrant up`/`reload` prompts for a
-     sudo password.
 
 ## Role variables
 
-All variables live in `ansible/roles/vagrant/defaults/main.yml` and can be
-overridden in the playbook, inventory, `-e`, or a `group_vars`/`host_vars`
+All variables live in `ansible/roles/lab_workstation/defaults/main.yml` and can
+be overridden in the playbook, inventory, `-e`, or a `group_vars`/`host_vars`
 file.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `vagrant_user` | `{{ ansible_user_id }}` | User the plugin is installed for and whose `~/.bashrc` gets edited. Vagrant plugins/state are per-user. |
-| `vagrant_prerequisite_packages` | `[curl, gpg]` | Packages needed to add the HashiCorp repo. |
-| `vagrant_hashicorp_gpg_key_url` | `https://apt.releases.hashicorp.com/gpg` | Where the signing key is fetched from. |
-| `vagrant_hashicorp_keyring` | `/usr/share/keyrings/hashicorp-archive-keyring.gpg` | Dearmored keyring path used to sign the repo. |
-| `vagrant_hashicorp_repo` | `deb [signed-by=...] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main` | The apt repo line added to `/etc/apt/sources.list.d/hashicorp.list`. |
-| `vagrant_package` | `vagrant` | Package name/version spec passed to `apt`. |
-| `vagrant_install_libvirt_provider` | `true` | Set `false` to install Vagrant only, skipping everything libvirt-related below. |
-| `vagrant_default_provider` | `libvirt` | Value exported as `VAGRANT_DEFAULT_PROVIDER`. |
-| `vagrant_libvirt_packages` | see defaults | QEMU/libvirt packages required to build/run the `vagrant-libvirt` plugin. |
-| `vagrant_manage_libvirt_group_membership` | `true` | Adds `vagrant_user` to `vagrant_libvirt_groups`. |
-| `vagrant_libvirt_groups` | `[libvirt, kvm]` | Groups added when the above is true. **Takes effect on the user's next login session**, not the current one. |
-| `vagrant_libvirt_storage_pool_name` | `default` | Name of the libvirt storage pool used for VM disk images. |
-| `vagrant_libvirt_storage_pool_path` | `/var/lib/libvirt/images` | Directory backing that pool. Change this to point VM disk storage at a different disk/mount. |
-| `vagrant_home` | `""` (unset) | If set, creates the directory, exports `VAGRANT_HOME` for the plugin-install tasks and in `~/.bashrc`, moving where Vagrant keeps downloaded boxes/plugins/machine state. |
-| `vagrant_install_hostmanager_plugin` | `true` | Installs the `vagrant-hostmanager` plugin, which syncs `/etc/hosts` on the host and every guest. |
-| `vagrant_hostmanager_manage_sudoers` | `true` | Deploys the `/etc/sudoers.d/vagrant_hostmanager` passwordless-sudo drop-in so hostmanager doesn't prompt for a password on every `vagrant up`. |
-| `vagrant_hostmanager_sudo_group` | `sudo` | Group granted that passwordless sudo rule. Use `wheel` on Fedora/RHEL. `vagrant_user` must be a member. |
+| `lab_workstation_user` | `{{ ansible_user_id }}` | User granted the group memberships and ownership of the storage-pool directory — the one who runs `terraform apply`. |
+| `lab_workstation_prerequisite_packages` | `[curl, gpg]` | Packages needed to add the HashiCorp repo. |
+| `lab_workstation_hashicorp_gpg_key_url` | `https://apt.releases.hashicorp.com/gpg` | Where the signing key is fetched from. |
+| `lab_workstation_hashicorp_keyring` | `/usr/share/keyrings/hashicorp-archive-keyring.gpg` | Dearmored keyring path used to sign the repo. |
+| `lab_workstation_hashicorp_repo` | `deb [signed-by=...] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main` | The apt repo line added to `/etc/apt/sources.list.d/hashicorp.list`. |
+| `lab_workstation_terraform_package` | `terraform` | Package name/version spec passed to `apt`. |
+| `lab_workstation_install_libvirt` | `true` | Set `false` to install terraform only, skipping everything libvirt-related below. |
+| `lab_workstation_libvirt_packages` | see defaults | QEMU/libvirt packages the lab VMs run on. |
+| `lab_workstation_manage_libvirt_group_membership` | `true` | Adds `lab_workstation_user` to `lab_workstation_libvirt_groups`. |
+| `lab_workstation_libvirt_groups` | `[libvirt, kvm]` | Groups added when the above is true. **Takes effect on the user's next login session**, not the current one. |
+| `lab_workstation_storage_pool_name` | `default` | Name of the libvirt storage pool used for VM disk images — Terraform's `pool` variable must match. |
+| `lab_workstation_storage_pool_path` | `/var/lib/libvirt/images` | Directory backing that pool. Change this to point VM disk storage at a different disk/mount. |
 
-### Example: custom storage locations, vagrant-only install
+### Example: custom storage location, terraform-only install
 
 ```yaml
 # ansible/host_vars/workstation.yml
-vagrant_libvirt_storage_pool_path: /data/libvirt/images
-vagrant_home: /data/vagrant.d
+lab_workstation_storage_pool_path: /data/libvirt/images
 ```
 
 ```yaml
-# to skip libvirt entirely and only install the vagrant binary:
-vagrant_install_libvirt_provider: false
+# to skip libvirt entirely and only install the terraform binary:
+lab_workstation_install_libvirt: false
 ```
 
 ## After running
@@ -256,22 +226,30 @@ Log out/in (or reboot) so the new `libvirt`/`kvm` group membership takes
 effect, then verify:
 
 ```bash
-vagrant --version
-vagrant plugin list
+terraform version
 virsh pool-list --all
 ```
 
-## Known gotchas (carried over from the manual install)
+## Known gotchas
 
-- `install_vagrant.md` itself used `https://hashicorp.com` in the apt repo
-  line, which is wrong and caused `429 Too Many Requests` errors. The role
-  uses the correct `apt.releases.hashicorp.com` for both the key and the
-  repo.
 - If a libvirt storage pool named `default` already exists (common on any
   host that's had libvirt installed before) pointing somewhere other than
-  `vagrant_libvirt_storage_pool_path`, the role fails intentionally instead
+  `lab_workstation_storage_pool_path`, the role fails intentionally instead
   of redefining it — migrate the pool by hand first if you need to relocate
   existing VM disks.
+
+## `k8s_node_hosts` role
+
+The first role `k8s-node-prereqs.yml` runs on every node. It writes a
+delimited block into each guest's `/etc/hosts` carrying every node's name and
+lab IP (from the generated inventory's `ansible_host`), so any node can
+resolve any other by hostname. It only knows about nodes in the inventory —
+`registry.lab` points at the *host* and is written by
+[`containerd_registry_trust`](#containerd_registry_trust-role) instead. The
+workstation's own `/etc/hosts` is not managed; see the root README for the
+entries to add by hand.
+
+No variables — the block is derived entirely from the inventory groups.
 
 ## `k8s_node_prereqs` role
 
@@ -286,20 +264,18 @@ modules: `apt`, `apt_repository`, `get_url`, `command`, `file`, `template`,
 
 ### How it's invoked
 
-Unlike the `vagrant` role, this one is **not** run from this directory with
-`ansible-playbook -i inventory.ini`. It's triggered automatically by
-Vagrant's built-in `ansible` provisioner, configured in `../Vagrantfile`,
-which runs `k8s-node-prereqs.yml` against an inventory Vagrant generates
-itself (correct SSH key/port per VM) whenever you run `vagrant up` or
-`vagrant provision` from the repo root.
+Unlike the `lab_workstation` role, this one is **not** run from this directory
+with `ansible-playbook -i inventory.ini`. It's triggered automatically by
+`terraform apply` (see `../terraform/provision.tf`), which runs
+`k8s-node-prereqs.yml` against the inventory Terraform generates at
+`../terraform/inventory.ini` (correct SSH key and user per VM) once every node
+is up.
 
-You can also run it manually against Vagrant's generated inventory for
-testing, from the repo root:
+You can also run it manually against that inventory for testing, from the
+repo root:
 
 ```bash
-ansible-playbook \
-  -i .vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory \
-  ansible/k8s-node-prereqs.yml
+ansible-playbook -i terraform/inventory.ini ansible/k8s-node-prereqs.yml
 ```
 
 ### What the role does
@@ -310,7 +286,7 @@ ansible-playbook \
    (`net.bridge.bridge-nf-call-iptables`, `net.bridge.bridge-nf-call-ip6tables`,
    `net.ipv4.ip_forward`, all `1`).
 4. Installs `containerd.io` from Docker's official apt repository (same
-   GPG-key/apt_repository pattern as the `vagrant` role's HashiCorp repo),
+   GPG-key/apt_repository pattern as the `lab_workstation` role's HashiCorp repo),
    generates its default config, and switches `SystemdCgroup` on.
 5. Installs `kubelet`/`kubeadm`/`kubectl` from the Kubernetes community apt
    repository (`pkgs.k8s.io`) pinned to `k8s_node_prereqs_kubernetes_version`,
@@ -361,9 +337,9 @@ Five roles that take the `spellcore_k8s_lab` nodes from "prerequisites installed
 drive from your own workstation: `k8s_control_plane_init`,
 `k8s_kubeconfig_cni`, `k8s_cluster_join`, `k8s_metrics_server`,
 `k8s_host_kubeconfig`. Like `k8s_node_prereqs`, they're invoked automatically
-by Vagrant's `ansible` provisioner (`k8s-cluster-bootstrap.yml`, attached right
-after `k8s-node-prereqs.yml`) rather than run by hand with `ansible-playbook -i
-inventory.ini`.
+by `terraform apply` (`k8s-cluster-bootstrap.yml`, run right after
+`k8s-node-prereqs.yml` and `k8s-registry-trust.yml`) rather than run by hand
+with `ansible-playbook -i inventory.ini`.
 
 No Ansible collections are required — only `ansible-core` modules: `apt`,
 `stat`, `command`, `getent`, `file`, `copy`, `get_url`, `slurp`, `tempfile`,
@@ -371,15 +347,13 @@ No Ansible collections are required — only `ansible-core` modules: `apt`,
 
 ### How it's invoked
 
-Same mechanism as `k8s_node_prereqs`: `vagrant up`/`vagrant provision` from
-the repo root runs `k8s-cluster-bootstrap.yml` against Vagrant's generated
-inventory once every node in the run is up. You can also run it by hand
-against that inventory for testing, from the repo root:
+Same mechanism as `k8s_node_prereqs`: `terraform apply` from the `terraform/`
+directory runs `k8s-cluster-bootstrap.yml` against the generated inventory
+once every node is up. You can also run it by hand against that inventory for
+testing, from the repo root:
 
 ```bash
-ansible-playbook \
-  -i .vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory \
-  ansible/k8s-cluster-bootstrap.yml
+ansible-playbook -i terraform/inventory.ini ansible/k8s-cluster-bootstrap.yml
 ```
 
 ### Why five roles, run in this order
@@ -393,7 +367,7 @@ sequence:
    token create --print-join-command` result, registered as a fact for the
    next play to read via `hostvars`.
 2. **`k8s_kubeconfig_cni`** (`hosts: k8s_control`) — copies `admin.conf` into
-   `~/.kube/config` for both the login user and the `vagrant` user on
+   `~/.kube/config` for both root and the SSH login user on
    `k8s-control`, delegates the same `~/.kube/config` staging out to
    `k8s-worker1`/`k8s-worker2` (via `delegate_to`, since the workers have no
    `admin.conf` of their own to copy from), then installs Calico as the CNI
@@ -424,8 +398,8 @@ All variables live in `ansible/roles/k8s_control_plane_init/defaults/main.yml`.
 |---|---|---|
 | `k8s_control_plane_init_install_etcdctl` | `true` | Set `false` to skip installing `etcdctl`. |
 | `k8s_control_plane_init_etcdctl_package` | `etcd-client` | Apt package providing the `etcdctl` binary. |
-| `k8s_control_plane_init_endpoint` | `192.168.56.10` | `--apiserver-advertise-address` passed to `kubeadm init`. Must track `k8s-control`'s IP in the `Vagrantfile`. |
-| `k8s_control_plane_init_pod_network_cidr` | `10.244.0.0/16` | `--pod-network-cidr` passed to `kubeadm init`. Must match `calicoNetwork.ipPools[0].cidr` in `k8s_kubeconfig_cni`'s `custom-resources.yaml` — chosen to not overlap with the `192.168.56.0/24` VM private network. |
+| `k8s_control_plane_init_endpoint` | `192.168.56.10` | `--apiserver-advertise-address` passed to `kubeadm init`. Must track `k8s-control`'s IP in the `nodes` map in `../terraform/variables.tf`. |
+| `k8s_control_plane_init_pod_network_cidr` | `10.244.0.0/16` | `--pod-network-cidr` passed to `kubeadm init`. Must match `calicoNetwork.ipPools[0].cidr` in `k8s_kubeconfig_cni`'s `custom-resources.yaml` — chosen to not overlap with the `192.168.56.0/24` lab network. |
 
 ### `k8s_kubeconfig_cni` role variables
 
@@ -434,7 +408,7 @@ All variables live in `ansible/roles/k8s_kubeconfig_cni/defaults/main.yml`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `k8s_kubeconfig_cni_user` | `{{ ansible_user_id }}` | User whose `~/.kube/config` is populated from `admin.conf` (with `become: true`, this resolves to `root`). |
-| `k8s_kubeconfig_cni_kube_config_users` | `{{ [k8s_kubeconfig_cni_user, 'vagrant'] \| unique }}` | Users who get `admin.conf` staged as `~/.kube/config`, on `k8s-control` and on every host in `k8s_workers`. Always includes `vagrant` so `vagrant ssh` sessions have working `kubectl` access. |
+| `k8s_kubeconfig_cni_kube_config_users` | `{{ [k8s_kubeconfig_cni_user, ansible_user \| default('spellcore')] \| unique }}` | Users who get `admin.conf` staged as `~/.kube/config`, on `k8s-control` and on every host in `k8s_workers`. Always includes the SSH login user so interactive sessions on a node have working `kubectl` access. |
 | `k8s_kubeconfig_cni_calico_version` | `v3.30.2` | Calico release used to build the Tigera operator manifest URL below. |
 | `k8s_kubeconfig_cni_tigera_operator_url` | `https://raw.githubusercontent.com/projectcalico/calico/{{ k8s_kubeconfig_cni_calico_version }}/manifests/tigera-operator.yaml` | Operator manifest, installed with `kubectl create` (not `apply` — its CRDs are too large for the `apply` annotation). |
 | `k8s_kubeconfig_cni_custom_resources_remote_path` | `/tmp/calico-custom-resources.yaml` | Where `files/custom-resources.yaml` is copied on the control-plane node before `kubectl apply`. |
@@ -481,10 +455,10 @@ Two things the upstream manifest gets right for this cluster and one it does
 not:
 
 - `--kubelet-preferred-address-types` already leads with `InternalIP`, and the
-  node `InternalIP`s here are the private-network addresses
-  (`192.168.56.10/.11/.12`), not the Vagrant NAT `10.0.2.15` they would be if
-  kubelet had picked the default-route interface. Scrapes reach the right host.
-  Confirm with `kubectl get nodes -o wide` before touching that ordering.
+  node `InternalIP`s here are the lab addresses (`192.168.56.10/.11/.12`) —
+  each node's single NIC is both its lab interface and its default route, so
+  kubelet can't pick anything else. Scrapes reach the right host. Confirm with
+  `kubectl get nodes -o wide` before touching that ordering.
 - The `v1beta1.metrics.k8s.io` APIService registration is in the same manifest,
   so there is nothing extra to apply.
 - **`--kubelet-insecure-tls` has to be added.** `kubeadm init` leaves
@@ -494,14 +468,14 @@ not:
   every scrape with `x509: cannot validate certificate ... doesn't contain any
   IP SANs`, while `kubectl top` reports "metrics not available yet" forever. The
   alternative — `serverTLSBootstrap: true` plus approving a kubelet-serving CSR
-  per node on every rotation — adds a manual step to `vagrant up` and buys
+  per node on every rotation — adds a manual step to `terraform apply` and buys
   nothing on an isolated private network. Same lab-only posture as
   `lab_registry_scheme: "http"`; don't carry it anywhere real.
 
 The flag is applied by rewriting the container's whole `args` array with
 `kubectl patch --type=json`, guarded by a read of the current args. An `add` op
 on `args/-` would be simpler and would stack a duplicate flag on every
-`vagrant provision`.
+provisioning re-run.
 
 The role finishes by waiting on three separate things, because each can succeed
 while the next still fails: the Deployment becoming Available, the APIService
@@ -537,19 +511,20 @@ All variables live in `ansible/roles/k8s_metrics_server/defaults/main.yml`.
 The one role here that changes something on **your workstation** rather than
 inside a VM. Its play targets `k8s_control` only so it can `slurp`
 `admin.conf`; every other task is `delegate_to: localhost` with `become:
-false`, so it acts as the user who ran `vagrant up`.
+false`, so it acts as the user who ran `terraform apply`.
 
-It gives you a working `kubectl` against the cluster without `vagrant ssh`:
+It gives you a working `kubectl` against the cluster without SSHing into a
+node:
 
 ```bash
-kubectl get nodes          # already pointed at the Vagrant cluster
+kubectl get nodes          # already pointed at the lab cluster
 ```
 
 **No tunnel or port-forward is involved.** `kubeadm init` runs with
 `--apiserver-advertise-address=192.168.56.10` (see
 `k8s_control_plane_init_endpoint`), so the API server listens on
-`k8s-control`'s private-network address, that address is routable from the
-host over the Vagrant private network, and it's in the API server cert's
+`k8s-control`'s lab address, that address is routable from the
+host over the lab network, and it's in the API server cert's
 SANs — so TLS verification succeeds against it as-is.
 
 #### How it avoids clobbering your other contexts
@@ -561,16 +536,15 @@ those replaces one named entry in place. Consequences worth relying on:
 
 - Contexts for **unrelated** clusters in the same kubeconfig are never read,
   rewritten or removed.
-- Re-running `vagrant up`/`vagrant provision` — including after a `vagrant
-  destroy`, which mints an entirely new CA — **overwrites the previous run's
-  entries** rather than accumulating a second one, because the names don't
-  change between runs.
+- Re-running the provisioning — including after a `terraform destroy`, which
+  mints an entirely new CA — **overwrites the previous run's entries** rather
+  than accumulating a second one, because the names don't change between runs.
 - `kubectl config use-context` at the end is the only thing that touches
   shared state (`current-context`); set `k8s_host_kubeconfig_set_current:
   false` to install the context without selecting it.
 
 Which file it writes to follows `KUBECONFIG`: its first `:`-separated entry
-if that variable is set in the shell you run `vagrant up` from, and
+if that variable is set in the shell you run `terraform apply` from, and
 `~/.kube/config` otherwise. The first time the role modifies that file it
 saves a one-time copy as `<path>.pre-spellcore-k8s-lab.bak`.
 
@@ -613,16 +587,15 @@ Configures the nodes to pull from the lab registry at `registry.lab:5000`
 only:** it doesn't install or run a registry, it makes the cluster able to use
 the one on the host.
 
-Invoked from `k8s-registry-trust.yml` by Vagrant's `ansible` provisioner,
+Invoked from `k8s-registry-trust.yml` by `terraform apply`,
 between `k8s-node-prereqs.yml` and `k8s-cluster-bootstrap.yml`, so the trust is
 in place before the cluster comes up. Three things have to line up before a
 kubelet can pull `registry.lab:5000/...`, and the role does one each:
 
-1. **The name has to resolve.** hostmanager runs with `manage_guest = true`, so
-   a node's `/etc/hosts` carries every *node* name — but that is all it can
-   provide: it maps names to machines defined in the `Vagrantfile`, and
-   `registry.lab` points at the host. The role writes
-   `192.168.56.1 registry.lab` itself.
+1. **The name has to resolve.** The `k8s_node_hosts` role fills each node's
+   `/etc/hosts` with every *node* name — but that is all it can provide: it
+   maps names to nodes in the inventory, and `registry.lab` points at the
+   host. The role writes `192.168.56.1 registry.lab` itself.
 2. **containerd has to read `certs.d`.** `containerd.io` ships its own
    `config.toml` with every plugin setting commented out, so
    `registry.config_path` is empty — which means "ignore `certs.d` entirely".
@@ -637,24 +610,22 @@ kubelet can pull `registry.lab:5000/...`, and the role does one each:
 
 It then confirms containerd's config actually points at `certs.d` (failing with
 an explicit message if not), and tries `GET http://registry.lab:5000/v2/` from
-the node — a warning, not a failure, so `vagrant up` still works when the
+the node — a warning, not a failure, so `terraform apply` still works when the
 registry isn't up. Restarting containerd doesn't stop running containers, so
 this is safe to re-run against a live cluster.
 
 Re-run by hand against the running VMs from the repo root:
 
 ```bash
-ansible-playbook \
-  -i .vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory \
-  ansible/k8s-registry-trust.yml
+ansible-playbook -i terraform/inventory.ini ansible/k8s-registry-trust.yml
 ```
 
 Check it:
 
 ```bash
-vagrant ssh k8s-control -c 'curl -s http://registry.lab:5000/v2/_catalog'
-vagrant ssh k8s-control -c 'sudo containerd config dump | grep -B3 config_path'
-vagrant ssh k8s-control -c 'sudo crictl pull registry.lab:5000/myapp:dev'
+ssh -i terraform/artifacts/lab_ed25519 spellcore@192.168.56.10 'curl -s http://registry.lab:5000/v2/_catalog'
+ssh -i terraform/artifacts/lab_ed25519 spellcore@192.168.56.10 'sudo containerd config dump | grep -B3 config_path'
+ssh -i terraform/artifacts/lab_ed25519 spellcore@192.168.56.10 'sudo crictl pull registry.lab:5000/myapp:dev'
 ```
 
 `crictl pull` is the real test — same containerd path a kubelet uses.
@@ -679,13 +650,13 @@ vagrant ssh k8s-control -c 'sudo crictl pull registry.lab:5000/myapp:dev'
 
 ## Observability roles
 
-Four roles that stand up an OTLP telemetry backend on the running cluster —
+Three roles that stand up an OTLP telemetry backend on the running cluster —
 Grafana for the UI, Tempo for traces, Loki for logs, MinIO as the shared S3
 object store behind both, and an OpenTelemetry collector gateway that anything
-in the cluster can push to: `k8s_node_storage_expand`, `helm_cli`,
-`k8s_local_path_storage`, `k8s_observability`. Like the bootstrap roles they're
-invoked automatically by Vagrant's `ansible` provisioner
-(`k8s-observability.yml`, attached right after `k8s-cluster-bootstrap.yml`).
+in the cluster can push to: `helm_cli`, `k8s_local_path_storage`,
+`k8s_observability`. Like the bootstrap roles they're invoked automatically by
+`terraform apply` (`k8s-observability.yml`, run right after
+`k8s-cluster-bootstrap.yml`).
 
 Everything lands in an `observability` namespace, but the collector's ingest
 endpoint is reachable from **every** namespace — the cluster has no default-deny
@@ -740,41 +711,33 @@ No Ansible collections are required — only `ansible-core` modules: `stat`,
 
 ### How it's invoked
 
-Same mechanism as the bootstrap roles: `vagrant up`/`vagrant provision` from
-the repo root runs `k8s-observability.yml` against Vagrant's generated
-inventory once every node in the run is up. To run it by hand, from the repo
-root:
+Same mechanism as the bootstrap roles: `terraform apply` runs
+`k8s-observability.yml` against the generated inventory once every node is up.
+To run it by hand, from the repo root:
 
 ```bash
-ansible-playbook \
-  -i .vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory \
-  ansible/k8s-observability.yml
+ansible-playbook -i terraform/inventory.ini ansible/k8s-observability.yml
 ```
 
 Re-running is a no-op: the playbook reports `changed=0` on a second pass, and
 `helm -n observability list` still shows `REVISION 1` for all six releases.
 
-### Why four roles, run in this order
+### Why three roles, run in this order
 
-`k8s-observability.yml` runs two plays. The first has to touch every node; the
-rest is cluster-scoped and runs once from the control plane.
+`k8s-observability.yml` runs one cluster-scoped play from the control plane.
+(Node root filesystems need no growing here: cloud-init's growpart expands
+each node's root filesystem to the full 128 G disk at first boot, so
+local-path volumes always have headroom.)
 
-1. **`k8s_node_storage_expand`** (`hosts: k8s_control:k8s_workers`) — grows each
-   node's root logical volume into the unallocated space left in its volume
-   group. Ubuntu's cloud image carves only a 63G root LV out of a 126G PV, so
-   roughly half of each disk sits unused. This runs **first** because
-   local-path persistent volumes are directories on the node root filesystem,
-   and 42Gi of claims on a 62G filesystem shared with containerd and the
-   kubelet invites disk-pressure evictions.
-2. **`helm_cli`** (`hosts: k8s_control`) — installs a pinned,
+1. **`helm_cli`** (`hosts: k8s_control`) — installs a pinned,
    checksum-verified `helm` binary at `/usr/local/bin/helm`. Nothing else in
    this repo uses Helm; this is where it enters.
-3. **`k8s_local_path_storage`** (`hosts: k8s_control`) — installs Rancher's
+2. **`k8s_local_path_storage`** (`hosts: k8s_control`) — installs Rancher's
    local-path-provisioner and patches its StorageClass to be the cluster
    default. Before this role the cluster has **no StorageClass at all**, so
    every chart's PVC would sit `Pending` forever. The upstream manifest does
    not annotate its class as default, hence the separate patch.
-4. **`k8s_observability`** (`hosts: k8s_control`) — installs the six Helm
+3. **`k8s_observability`** (`hosts: k8s_control`) — installs the six Helm
    releases in dependency order: MinIO (so the buckets exist), then Prometheus
    (so Tempo's metrics-generator has somewhere to remote-write from its first
    second), then Tempo and Loki (which need those buckets), then the collector
@@ -936,20 +899,6 @@ Note that MinIO's chart *generates* its root credentials when they are left
 empty, which would rotate them on every re-provision and break Tempo and Loki
 with S3 auth errors. They must always be set explicitly.
 
-### `k8s_node_storage_expand` role variables
-
-All variables live in `ansible/roles/k8s_node_storage_expand/defaults/main.yml`.
-This role runs on the workers too, so override these in `group_vars/all.yml`,
-**not** in `host_vars/k8s-control.yml`.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `k8s_node_storage_expand_vg` | `ubuntu-vg` | Volume group holding the root LV. Ubuntu cloud-image default. |
-| `k8s_node_storage_expand_lv` | `ubuntu-lv` | Root logical volume name. |
-| `k8s_node_storage_expand_lv_path` | `/dev/ubuntu-vg/ubuntu-lv` | Device path `lvextend` is pointed at. Everything is skipped if this doesn't exist, so a non-LVM box is a clean no-op. |
-| `k8s_node_storage_expand_extents` | `+100%FREE` | How much free VG space to claim. Takes all of it, which forecloses adding a separate LV later — use `+32G` or similar to leave room. |
-| `k8s_node_storage_expand_min_free_bytes` | `1073741824` | Don't resize for less than this much free space. Also what makes the role idempotent: after the first run `vg_free` is 0, so the `lvextend` skips instead of failing on "insufficient free space". |
-
 ### `helm_cli` role variables
 
 All variables live in `ansible/roles/helm_cli/defaults/main.yml`.
@@ -1039,9 +988,6 @@ All variables live in `ansible/roles/k8s_observability/defaults/main.yml`.
 
 ### Known gotchas
 
-- **`vagrant up k8s-control` alone won't run this.** Provisioners attach only to
-  the last-defined node, so only a bare `vagrant up`/`vagrant provision`
-  triggers the playbook. Same caveat as the other three.
 - **Almost all workloads land on the workers — node-exporter is the exception.**
   `k8s-control` carries `node-role.kubernetes.io/control-plane:NoSchedule`, so
   the schedulable budget is two nodes, about 8 vCPU and 15Gi, not three. Don't
@@ -1059,7 +1005,7 @@ All variables live in `ansible/roles/k8s_observability/defaults/main.yml`.
 - **`helm upgrade --install` can't report idempotence by itself.** It always
   exits 0, always prints the same output, and Helm 3 mints a new revision on
   every invocation. Each release is therefore gated on "release absent **or**
-  rendered values changed"; without that, every `vagrant provision` would report
+  rendered values changed"; without that, every provisioning re-run would report
   `changed` and push a pointless revision.
 - **The pinned collector distro has no `prometheusremotewrite` exporter.**
   `otel/opentelemetry-collector-k8s:0.158.0` ships exactly `debug`, `nop`,

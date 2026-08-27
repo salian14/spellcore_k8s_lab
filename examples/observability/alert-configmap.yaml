@@ -1,0 +1,113 @@
+---
+# An alert rule shipped by an application, in the application's own namespace.
+#
+# Grafana's `grafana-sc-alerts` sidecar watches every namespace for ConfigMaps
+# carrying the `grafana_alert` label and writes them into Grafana's alerting
+# provisioning directory. Alertmanager is not running in this cluster -- Grafana's
+# own embedded alerting is the path, so the payload is Grafana provisioning YAML.
+#
+#   kubectl -n my-namespace apply -f alert-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-app-alerts
+  labels:
+    # Presence is what matches. Note this is a DIFFERENT label from dashboards,
+    # watched by a different sidecar container.
+    grafana_alert: "1"
+data:
+  my-app-alerts.yaml: |
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: my-app
+        # The Grafana folder, as a key in the YAML -- NOT a grafana_folder
+        # annotation the way dashboards do it. The alerts sidecar has no
+        # folder-annotation support, so annotating the ConfigMap does nothing.
+        # Grafana creates the folder if it does not already exist.
+        folder: Applications
+        # How often the rules in this group are evaluated.
+        interval: 1m
+        rules:
+          # Keep the uid stable. Changing it provisions a SECOND rule rather
+          # than editing this one.
+          - uid: my-app-error-rate
+            title: my-app error rate above 5%
+            # Names the refId that decides whether this fires. It has to be an
+            # expression node producing a boolean, not the raw query.
+            condition: C
+            # How long the condition must hold before the rule fires, as opposed
+            # to going Pending.
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            labels:
+              severity: warning
+            annotations:
+              summary: >-
+                Error rate for my-app has been above 5% for 5 minutes
+              description: >-
+                Ratio of STATUS_CODE_ERROR spans to all spans, derived by Tempo's
+                metrics-generator. Check Explore -> Tempo, filtered to
+                status = error, for the traces behind it.
+            data:
+              # The query. Note `service`, not `service.name`: span metrics carry
+              # a different label vocabulary from metrics pushed over OTLP.
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                # Mandatory. There is no default datasource to fall back on here.
+                datasourceUid: prometheus
+                model:
+                  refId: A
+                  instant: true
+                  editorMode: code
+                  expr: >-
+                    sum(rate(traces_spanmetrics_calls_total{service="my-app",status_code="STATUS_CODE_ERROR"}[5m]))
+                    /
+                    sum(rate(traces_spanmetrics_calls_total{service="my-app"}[5m]))
+              # The threshold. `__expr__` is the special uid for Grafana's
+              # server-side expressions (threshold, reduce, math, classic).
+              - refId: C
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator:
+                        type: gt
+                        params:
+                          - 0.05
+
+    # --- routing -------------------------------------------------------------
+    #
+    # Left commented on purpose. With no contact point, a firing alert is visible
+    # in Grafana's Alerting UI and goes nowhere else -- which is a reasonable
+    # default for a lab with no mail server or chat webhook.
+    #
+    # Uncommenting `policies` REPLACES Grafana's root notification policy, so
+    # provision it from one place only rather than from several applications at
+    # once.
+    #
+    # contactPoints:
+    #   - orgId: 1
+    #     name: my-app-webhook
+    #     receivers:
+    #       - uid: my-app-webhook
+    #         type: webhook
+    #         settings:
+    #           url: http://my-webhook.my-namespace.svc.cluster.local:8080/alerts
+    #
+    # policies:
+    #   - orgId: 1
+    #     receiver: grafana-default-email
+    #     group_by: [grafana_folder, alertname]
+    #     routes:
+    #       - receiver: my-app-webhook
+    #         object_matchers:
+    #           - [severity, =, warning]

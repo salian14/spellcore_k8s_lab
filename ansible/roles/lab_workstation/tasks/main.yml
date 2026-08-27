@@ -1,0 +1,102 @@
+---
+- name: Install prerequisite packages
+  ansible.builtin.apt:
+    name: "{{ lab_workstation_prerequisite_packages }}"
+    state: present
+    update_cache: true
+
+- name: Download HashiCorp GPG key
+  ansible.builtin.get_url:
+    url: "{{ lab_workstation_hashicorp_gpg_key_url }}"
+    dest: /tmp/hashicorp-gpg-key
+    mode: "0644"
+
+- name: Dearmor HashiCorp GPG key into apt keyring
+  ansible.builtin.command:
+    cmd: "gpg --dearmor --yes --output {{ lab_workstation_hashicorp_keyring }} /tmp/hashicorp-gpg-key"
+    creates: "{{ lab_workstation_hashicorp_keyring }}"
+
+- name: Add HashiCorp apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ lab_workstation_hashicorp_repo }}"
+    filename: hashicorp
+    state: present
+  register: lab_workstation_hashicorp_repo_added
+
+- name: Update apt cache after adding HashiCorp repo
+  ansible.builtin.apt:
+    update_cache: true
+  when: lab_workstation_hashicorp_repo_added.changed
+
+- name: Install Terraform
+  ansible.builtin.apt:
+    name: "{{ lab_workstation_terraform_package }}"
+    state: present
+
+- name: Install libvirt/QEMU packages
+  ansible.builtin.apt:
+    name: "{{ lab_workstation_libvirt_packages }}"
+    state: present
+  when: lab_workstation_install_libvirt
+
+- name: Add user to libvirt/kvm groups
+  ansible.builtin.user:
+    name: "{{ lab_workstation_user }}"
+    groups: "{{ lab_workstation_libvirt_groups }}"
+    append: true
+  when:
+    - lab_workstation_install_libvirt
+    - lab_workstation_manage_libvirt_group_membership
+
+- name: Ensure libvirt storage pool directory exists
+  ansible.builtin.file:
+    path: "{{ lab_workstation_storage_pool_path }}"
+    state: directory
+    owner: "{{ lab_workstation_user }}"
+    group: "{{ lab_workstation_user }}"
+    mode: "0755"
+  when: lab_workstation_install_libvirt
+
+- name: Check existing libvirt storage pool definition
+  ansible.builtin.command: "virsh pool-dumpxml {{ lab_workstation_storage_pool_name }}"
+  register: lab_workstation_pool_xml
+  changed_when: false
+  failed_when: false
+  when: lab_workstation_install_libvirt
+
+- name: Fail if storage pool already exists at a different path
+  ansible.builtin.fail:
+    msg: >-
+      libvirt storage pool '{{ lab_workstation_storage_pool_name }}' already exists
+      and does not point at {{ lab_workstation_storage_pool_path }}. Refusing to
+      redefine an existing pool automatically; migrate or remove it manually first.
+  when:
+    - lab_workstation_install_libvirt
+    - lab_workstation_pool_xml.rc == 0
+    - lab_workstation_storage_pool_path not in lab_workstation_pool_xml.stdout
+
+- name: Define libvirt storage pool
+  ansible.builtin.command: >-
+    virsh pool-define-as {{ lab_workstation_storage_pool_name }} dir
+    --target {{ lab_workstation_storage_pool_path }}
+  when:
+    - lab_workstation_install_libvirt
+    - lab_workstation_pool_xml.rc != 0
+
+- name: Build libvirt storage pool
+  ansible.builtin.command: "virsh pool-build {{ lab_workstation_storage_pool_name }}"
+  when:
+    - lab_workstation_install_libvirt
+    - lab_workstation_pool_xml.rc != 0
+
+- name: Start libvirt storage pool
+  ansible.builtin.command: "virsh pool-start {{ lab_workstation_storage_pool_name }}"
+  when:
+    - lab_workstation_install_libvirt
+    - lab_workstation_pool_xml.rc != 0
+
+- name: Set libvirt storage pool to autostart
+  ansible.builtin.command: "virsh pool-autostart {{ lab_workstation_storage_pool_name }}"
+  when:
+    - lab_workstation_install_libvirt
+    - lab_workstation_pool_xml.rc != 0

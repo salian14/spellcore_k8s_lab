@@ -1,0 +1,105 @@
+---
+# A Deployment carrying the full OTLP wiring described in
+# docs/observability-for-developers.md. Swap the image and the service name for
+# your own; everything else is the convention this lab expects.
+#
+# There is nothing to install cluster-side -- the collector Service is reachable
+# from every namespace.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+      # Only needed if this app exposes a Prometheus /metrics endpoint AND does
+      # not push metrics over OTLP. Pushing is the primary path here -- see the
+      # "Letting Prometheus scrape you" section of the guide before uncommenting.
+      #
+      # annotations:
+      #   prometheus.io/scrape: "true"
+      #   prometheus.io/port: "8080"
+      #   prometheus.io/path: /metrics
+    spec:
+      containers:
+        - name: my-app
+          image: registry.lab:5000/my-app:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # --- where telemetry goes ---
+            # One gateway takes traces, metrics and logs. Use :4318 with
+            # http/protobuf instead if your SDK prefers HTTP.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4317
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: grpc
+
+            # --- identity ---
+            # The single most important variable in this file. Left unset the SDK
+            # reports `unknown_service`, and this is the join key for every
+            # cross-signal link in Grafana.
+            - name: OTEL_SERVICE_NAME
+              value: my-app
+
+            # --- behaviour ---
+            # W3C headers, so traces join up across services and Tempo can build
+            # the service graph.
+            - name: OTEL_PROPAGATORS
+              value: tracecontext,baggage
+            # No sampling is configured anywhere in this lab; a cluster this size
+            # can afford to keep every span.
+            - name: OTEL_TRACES_SAMPLER
+              value: parentbased_always_on
+            # Milliseconds. Prometheus scrapes at 30s, so pushing faster than
+            # this buys nothing.
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: "60000"
+
+            # --- resource attributes ---
+            # Deliberately short. The collector's k8sattributes processor adds
+            # every k8s.* attribute by itself, and DERIVES service.namespace
+            # (from the pod's namespace) and service.instance.id (as
+            # <namespace>.<pod>.<container>) -- so each replica already gets a
+            # distinct `instance` label in Prometheus with no downward API here.
+            #
+            # What is left is only what the cluster cannot know about you.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: service.version=0.1.0,deployment.environment.name=lab
+
+            # Python only: the auto-instrumentation does not hook the logging
+            # module unless asked, and without it no logs reach Loki.
+            - name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED
+              value: "true"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: my-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
