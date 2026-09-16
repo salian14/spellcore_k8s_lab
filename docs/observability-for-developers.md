@@ -7,11 +7,11 @@ if it isn't, start at the [README](../README.md).
 The short version: set a block of `OTEL_*` environment variables pointing at the
 collector gateway, and traces, metrics and logs all arrive with no other
 infrastructure work. Dashboards and alert rules ship as labelled ConfigMaps in
-your own namespace. Nothing here needs a change to the `k8s_observability`
-Ansible role.
+your own namespace. Nothing here needs a change to the stack's own manifests
+under `gitops/observability/`.
 
 For *why* the stack is built the way it is — chart choices, values, the traps
-behind each setting — see [`ansible/README.md`](../ansible/README.md#observability-roles).
+behind each setting — see [`gitops/README.md`](../gitops/README.md#the-observability-stack).
 This document only covers using it.
 
 ## What you get
@@ -31,12 +31,12 @@ Where each signal ends up:
 
 | Signal | Path | Store | Retention |
 | --- | --- | --- | --- |
-| Traces | app → collector → Tempo | MinIO (S3) | 72h |
-| Logs | app → collector → Loki | MinIO (S3) | 168h (7 days) |
+| Traces | app → collector → Tempo | SeaweedFS (S3) | 72h |
+| Logs | app → collector → Loki | SeaweedFS (S3) | 168h (7 days) |
 | Metrics, pushed | app → collector → Prometheus OTLP receiver | local-path PVC | 15d |
 | Metrics, scraped | Prometheus → your `/metrics` | local-path PVC | 15d |
 | RED metrics + service graph | Tempo derives them from your spans | local-path PVC | 15d |
-| Kubernetes events | collector `k8s_events` receiver → Loki | MinIO (S3) | 168h |
+| Kubernetes events | collector `k8s_events` receiver → Loki | SeaweedFS (S3) | 168h |
 
 **Pod `stdout`/`stderr` is not collected.** There is no log-scraping DaemonSet on
 the nodes, so `kubectl logs` output does not reach Loki. Logs get there by your
@@ -651,7 +651,7 @@ Roughly in the order worth checking.
 ## See also
 
 - [`README.md`](../README.md#observability) — what the stack is and how to reach it
-- [`ansible/README.md`](../ansible/README.md#observability-roles) — why every chart
-  and value was chosen, and the traps behind them
+- [`gitops/README.md`](../gitops/README.md#the-observability-stack) — why every
+  chart and value was chosen, and the traps behind them
 - [`examples/observability/`](../examples/observability/) — runnable manifests for
   everything in this guide

@@ -1,14 +1,18 @@
----
-# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+# Values for the prometheus-community/prometheus chart, synced by Argo CD from
+# this file (see gitops/observability/apps/templates/prometheus.yaml). A commit
+# here is a `helm upgrade`.
 #
 # The plain `prometheus` server chart: one Deployment, no operator, no CRDs.
 # kube-state-metrics and node-exporter ride along as bundled subcharts, so this
-# is one Helm release rather than three.
+# is one release rather than three.
 server:
-  retention: {{ k8s_observability_prometheus_retention }}
+  retention: 15d
 
   global:
-    scrape_interval: {{ k8s_observability_prometheus_scrape_interval }}
+    # How often every scrape target is polled. 30s rather than the chart's 15s
+    # halves both sample volume and CPU; nothing in this lab needs 15s
+    # resolution.
+    scrape_interval: 30s
 
   # Written bare, WITHOUT a leading `--`: templates/deploy.yaml ranges over this
   # list and prepends the dashes itself, so "--web.enable-lifecycle" here would
@@ -52,17 +56,22 @@ server:
       - k8s.node.name
 
   # No S3 backend exists for Prometheus, so this volume is the only copy of the
-  # metrics -- unlike Tempo and Loki, nothing here is flushed to MinIO.
+  # metrics -- unlike Tempo and Loki, nothing here is flushed to the object
+  # store. Retention above is therefore bounded by this size and nothing else;
+  # raising one without the other just means the TSDB evicts earlier than the
+  # setting claims.
   persistentVolume:
     enabled: true
-    size: {{ k8s_observability_prometheus_pvc_size }}
-    storageClass: {{ k8s_observability_storage_class }}
+    size: 20Gi
+    storageClass: local-path
 
   # NodePort as well as the Grafana datasource: /targets is the page that
-  # answers "why is this metric missing?", and Grafana cannot show it.
+  # answers "why is this metric missing?", and Grafana cannot show it. 30080 is
+  # fathom/fathom-agent, 30300 is Grafana and 30800 is Argo CD, so 30090 it is.
+  # Reachable at http://192.168.56.10:30090 (every node IP works).
   service:
     type: NodePort
-    nodePort: {{ k8s_observability_prometheus_node_port }}
+    nodePort: 30090
 
   resources:
     requests:

@@ -3,14 +3,17 @@
 A three-node Kubernetes lab on local VMs. `terraform apply` builds the machines
 and then provisions them the rest of the way: a `kubeadm` cluster with Calico
 networking, metrics-server, trust for the lab image registry, a `kubectl`
-context installed on **your workstation**, a Grafana/Tempo/Loki/Prometheus
-observability backend, and Argo CD for GitOps delivery. One command, from
-nothing to a cluster you can drive from your own shell.
+context installed on **your workstation**, and Argo CD — which then deploys
+a Grafana/Tempo/Loki/Prometheus observability backend from this repository's
+[`gitops/`](gitops/) directory. One command, from nothing to a cluster you can
+drive from your own shell.
 
 Terraform (the [`dmacvicar/libvirt`](https://registry.terraform.io/providers/dmacvicar/libvirt)
-provider) owns the VMs, network, disks and cloud-init; everything past first
-boot is Ansible — thirteen roles across five playbooks, all idempotent, all
-listed under [Ansible roles](#ansible-roles).
+provider) owns the VMs, network, disks and cloud-init; the cluster itself is
+Ansible — twelve roles across four playbooks, all idempotent, all listed under
+[Ansible roles](#ansible-roles); and everything that *runs on* the cluster is
+Argo CD reconciling [`gitops/`](gitops/README.md). Ansible's last act is to
+hand over.
 
 ## The VMs
 
@@ -137,13 +140,14 @@ ssh -i terraform/artifacts/lab_ed25519 spellcore@192.168.56.10   # log into a no
 # re-run every playbook against the running lab (idempotent):
 terraform -chdir=terraform apply -replace=terraform_data.ansible
 # or just one:
-ansible-playbook -i terraform/inventory.ini ansible/k8s-observability.yml
+ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
 ```
 
 A cold `terraform apply` is not quick: it downloads the cloud image on the
-first run, installs a cluster, and deploys seven Helm releases. Re-running the
-playbooks against a healthy lab is a no-op — every role is idempotent, and the
-observability playbook reports `changed=0` on a second pass.
+first run and installs a cluster, and Argo CD then spends a few more minutes
+pulling the observability stack's images. Re-running the playbooks against a
+healthy lab is a no-op — every role is idempotent and reports `changed=0` on a
+second pass.
 
 **Power state.** Terraform doesn't manage it. `virsh -c qemu:///system
 shutdown <node>` halts a VM and `virsh -c qemu:///system start <node>` brings
@@ -168,7 +172,7 @@ there (it's delimited by `## vagrant-hostmanager-section` markers).
 
 ## What `terraform apply` provisions
 
-Terraform writes an inventory to `terraform/inventory.ini` and runs five
+Terraform writes an inventory to `terraform/inventory.ini` and runs four
 playbooks, in this order (see [`terraform/provision.tf`](terraform/provision.tf)):
 
 1. **`ansible/k8s-node-prereqs.yml`** — every node. Node names into
@@ -178,27 +182,27 @@ playbooks, in this order (see [`terraform/provision.tf`](terraform/provision.tf)
 2. **`ansible/k8s-registry-trust.yml`** — every node. Makes `registry.lab:5000`
    resolvable and pullable. Runs *before* the cluster exists so local images are
    available from the moment the nodes are `Ready`.
-3. **`ansible/k8s-cluster-bootstrap.yml`** — five plays that take the nodes from
+3. **`ansible/k8s-cluster-bootstrap.yml`** — six plays that take the nodes from
    "prerequisites installed" to a `Ready` cluster: `kubeadm init` on the control
-   plane, kubectl + Calico, `kubeadm join` on the workers, metrics-server, then
-   the workstation kubeconfig context. The CNI goes in **before** the workers
-   join, so no worker sits joined without pod networking; metrics-server comes
-   after, so its readiness check covers every node; the kubeconfig role runs
-   last, so the context it hands you points at a complete cluster.
-4. **`ansible/k8s-observability.yml`** — installs Helm, a default StorageClass
-   and the telemetry stack. Needs a working cluster.
-5. **`ansible/k8s-argocd.yml`** — installs Argo CD from the upstream Helm chart,
-   exposed on a NodePort with a known admin password, and optionally applies an
-   app-of-apps bootstrap Application. Runs last; it needs the cluster but
-   nothing from the telemetry stack, so an observability failure doesn't take
-   it down and vice versa.
+   plane, kubectl + Calico, `kubeadm join` on the workers, metrics-server, a
+   default StorageClass, then the workstation kubeconfig context. The CNI goes
+   in **before** the workers join, so no worker sits joined without pod
+   networking; metrics-server comes after, so its readiness check covers every
+   node; the StorageClass is cluster substrate that everything Argo CD later
+   deploys will claim volumes from; the kubeconfig role runs last, so the
+   context it hands you points at a complete cluster.
+4. **`ansible/k8s-argocd.yml`** — installs Helm and Argo CD from the upstream
+   chart, exposed on a NodePort with a known admin password, and applies one
+   app-of-apps `Application` pointed at this repository's `gitops/bootstrap`.
+   From there Argo CD deploys the observability stack on its own — see
+   [GitOps with Argo CD](#gitops-with-argo-cd).
 
 `ansible/playbook.yml` is the odd one out: it targets **your workstation**, not
 the guests, and Terraform never runs it. See [Requirements](#requirements).
 
 ## Ansible roles
 
-Thirteen roles. Full variable tables and design notes for each are in
+Twelve roles. Full variable tables and design notes for each are in
 [`ansible/README.md`](ansible/README.md).
 
 | Role | Playbook | Hosts | What it does |
@@ -211,11 +215,10 @@ Thirteen roles. Full variable tables and design notes for each are in
 | `k8s_kubeconfig_cni` | `k8s-cluster-bootstrap.yml` | control | Stages `admin.conf` as `~/.kube/config` for root and the login user on every node, installs Calico v3.30.2 via the Tigera operator, waits for `Ready` |
 | `k8s_cluster_join` | `k8s-cluster-bootstrap.yml` | workers | Runs `kubeadm join` with the token from the control-plane play |
 | `k8s_metrics_server` | `k8s-cluster-bootstrap.yml` | control | metrics-server v0.9.0 plus `--kubelet-insecure-tls`, waited on until `kubectl top nodes` actually answers — this is what makes `kubectl top` and HPAs work |
+| `k8s_local_path_storage` | `k8s-cluster-bootstrap.yml` | control | local-path-provisioner v0.0.37, patched to be the cluster's default StorageClass — before this the cluster has none at all |
 | `k8s_host_kubeconfig` | `k8s-cluster-bootstrap.yml` | control → localhost | Writes a `spellcore-k8s-lab` cluster/user/context into **your** kubeconfig and makes it current |
-| `helm_cli` | `k8s-observability.yml` | control | Installs a pinned, checksum-verified Helm 3.21.4 at `/usr/local/bin/helm` |
-| `k8s_local_path_storage` | `k8s-observability.yml` | control | local-path-provisioner v0.0.37, patched to be the cluster's default StorageClass — before this the cluster has none at all |
-| `k8s_observability` | `k8s-observability.yml` | control | Six Helm releases (MinIO, Prometheus, Tempo, Loki, OTel collector, Grafana) in dependency order, plus seven dashboards as labelled ConfigMaps |
-| `k8s_argocd` | `k8s-argocd.yml` | control | Argo CD v3.5.3 from the `argo/argo-cd` chart, plain-HTTP NodePort, fixed admin password, optional app-of-apps bootstrap Application |
+| `helm_cli` | `k8s-argocd.yml` | control | Installs a pinned, checksum-verified Helm 3.21.4 at `/usr/local/bin/helm` |
+| `k8s_argocd` | `k8s-argocd.yml` | control | Argo CD v3.5.3 from the `argo/argo-cd` chart, plain-HTTP NodePort, fixed admin password, and the app-of-apps `bootstrap` Application pointed at `gitops/bootstrap` |
 
 ## Using kubectl from your workstation
 
@@ -252,8 +255,11 @@ variable list).
 
 ## Observability
 
-`terraform apply` also stands up an OTLP telemetry backend in an
-`observability` namespace. Open Grafana in your host browser at:
+Argo CD stands up an OTLP telemetry backend in an `observability` namespace,
+from [`gitops/observability/`](gitops/observability/) — it follows the
+platform stack in the `bootstrap` Application's sync order, so it arrives a
+few minutes after `terraform apply` finishes. Open Grafana in your host
+browser at:
 
 **<http://192.168.56.10:30300>** — `admin` / `lab-observability`
 
@@ -310,10 +316,15 @@ What this stack does and doesn't collect:
   window and stores nothing. Prometheus can't serve them and metrics-server
   can't back Prometheus.
 
-Traces and logs sit behind MinIO's S3 API on local-path persistent volumes.
-Prometheus is the exception: it has no object-storage backend, so its 20Gi
-volume is the only copy of the metrics and retention (15 days) is bounded by
-disk.
+Traces and logs sit behind an S3 object store — [SeaweedFS](https://github.com/seaweedfs/seaweedfs),
+which replaced MinIO when MinIO's community edition was archived — on
+local-path persistent volumes. The store is not part of the observability
+stack: it is a **platform** service in its own `platform` namespace
+([`gitops/platform/`](gitops/platform/)), synced before any application
+stack, and the observability stack is its first tenant with its own
+bucket-scoped S3 identity. Prometheus is the exception: it has no
+object-storage backend, so its 20Gi volume is the only copy of the metrics
+and retention (15 days) is bounded by disk.
 
 Two consequences of local-path storage worth knowing: volumes are directories on
 whichever node the consuming pod first landed on, so that pod can never move;
@@ -323,7 +334,13 @@ Dashboards and alerts are **delegated**: Grafana's sidecars watch every
 namespace for ConfigMaps labelled `grafana_dashboard` or `grafana_alert`, so an
 application ships its own observability alongside its own manifests. The seven
 bundled cluster dashboards use exactly that mechanism — see
-[`ansible/README.md`](ansible/README.md#dashboards-and-alerts).
+[`gitops/README.md`](gitops/README.md#dashboards-and-alerts).
+
+To change anything about the stack — retention, volume sizes, a chart version,
+the credentials — edit the matching file under `gitops/observability/`, commit,
+and open a PR against `bifrost`. Argo CD applies it within a minute of the
+merge. [`gitops/README.md`](gitops/README.md) is the map, and carries the
+reasoning behind every chart and value.
 
 Deploying an application into this cluster and want its telemetry in Grafana?
 [`docs/observability-for-developers.md`](docs/observability-for-developers.md) is
@@ -347,28 +364,32 @@ argocd login 192.168.56.10:30800 --username admin --password lab-argocd --plaint
 argocd app list
 ```
 
-Argo CD comes up with **no applications**. The intended way to give it some is
-an app-of-apps: point it at a git repository whose `bootstrap/` directory holds
-`Application`, `ApplicationSet` and `AppProject` manifests, and let it create
-the rest from there. Set the repository in `ansible/host_vars/k8s-control.yml`
-and re-run the playbook:
+The `k8s_argocd` role applies one `Application`, named `bootstrap`, pointed
+at this repository's [`gitops/bootstrap`](gitops/bootstrap/) on the `bifrost`
+branch, with automated sync, prune and self-heal. That is an app-of-apps: it
+creates a `platform` Application (shared services — the object store) and
+then an `observability` Application, each of which creates one Application
+per component, in dependency order. From then on a commit to `gitops/` on
+`bifrost` *is* the deployment, and a `kubectl edit` behind Argo CD's back is
+reverted. [`gitops/README.md`](gitops/README.md) explains the layout, the
+rule for what is Ansible versus platform versus application, how to make a
+change, and how to point the lab at a feature branch instead:
 
 ```yaml
 # ansible/host_vars/k8s-control.yml
-k8s_argocd_bootstrap_repo_url: https://github.com/you/lab-gitops.git
-k8s_argocd_bootstrap_repo_path: bootstrap   # default
+k8s_argocd_bootstrap_repo_revision: agent/feat/my-change
 ```
 
 ```bash
 ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
 ```
 
-That applies one `Application` named `bootstrap` with automated sync, prune
-and self-heal, so from then on a commit to the repository *is* the deployment
-and a `kubectl edit` behind Argo CD's back is reverted. The repository has to
-be reachable from the cluster — the lab network is NAT'd, so public GitHub
-works; a private repository needs a repo credential Secret in the `argocd`
-namespace first, which the role doesn't manage.
+Argo CD pulls from GitHub, not from your checkout — the lab network is NAT'd,
+so public GitHub works and the branch has to be pushed first. Pointing the
+role at another repository entirely is `k8s_argocd_bootstrap_repo_url` (a
+private one needs a repo credential Secret in the `argocd` namespace first,
+which the role doesn't manage), and setting that to `""` installs Argo CD with
+no applications at all.
 
 Anything Argo CD deploys can ship its telemetry the same way everything else
 does — see [Observability](#observability) and
@@ -390,13 +411,15 @@ variable away; see `ansible/README.md`.
 - **Guest user, image source, disk size** — `guest_user`,
   `ubuntu_image_source` and `disk_size` in the same file, or a
   `terraform.tfvars` next to it.
-- **Argo CD password, NodePort, bootstrap repository** — same file,
-  `ansible/host_vars/k8s-control.yml`; the `k8s_argocd_*` variables are listed
-  in [`ansible/README.md`](ansible/README.md#argo-cd-role).
-- **Observability credentials, NodePorts, retention, volume sizes** — copy
+- **Argo CD password, NodePort, which branch the cluster runs** — copy
   `ansible/host_vars/k8s-control.yml.example` to
   `ansible/host_vars/k8s-control.yml` (untracked) and override there rather than
-  editing role defaults.
+  editing role defaults; the `k8s_argocd_*` variables are listed in
+  [`ansible/README.md`](ansible/README.md#argo-cd-role).
+- **Observability credentials, NodePorts, retention, volume sizes, chart
+  versions** — the files under `gitops/observability/`, committed and merged
+  to `bifrost`. Not Ansible variables any more; see
+  [`gitops/README.md`](gitops/README.md#making-a-change).
 - **Workstation-side install** — `ansible/host_vars/localhost.yml` overrides
   the `lab_workstation` role's defaults (storage-pool path, whether to install
   the libvirt stack at all).
@@ -419,10 +442,9 @@ variable away; see `ansible/README.md`.
 kubectl get nodes -o wide                      # three Ready nodes, InternalIP 192.168.56.x
 kubectl top nodes                              # metrics-server is serving
 kubectl get sc                                 # local-path (default)
-kubectl -n observability get pods              # the six releases' pods
-kubectl -n argocd get pods,applications        # Argo CD, plus `bootstrap` if a repo is set
-ssh -i terraform/artifacts/lab_ed25519 spellcore@192.168.56.10 \
-  'sudo helm -n observability list --kubeconfig /etc/kubernetes/admin.conf'
+kubectl -n argocd get applications             # bootstrap, platform, observability and their components -- Synced / Healthy
+kubectl -n platform get pods                   # the object store
+kubectl -n observability get pods              # the stack's pods, once Argo CD has synced them
 ```
 
 Registry trust, from a node — `crictl pull` is the real test, since it uses the

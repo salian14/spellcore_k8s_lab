@@ -1,0 +1,8 @@
+# Wave 0: the Secret holding every S3 identity. First, because the object
+# store's init container fails without it, and because this is also the
+# Application that creates the platform namespace.
+{{ include "platform.directoryApplication" (dict
+  "root" .
+  "name" "object-store-identities"
+  "wave" 0
+  "path" "gitops/platform/credentials") }}

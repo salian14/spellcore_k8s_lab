@@ -1,0 +1,85 @@
+# Cluster dashboards, delivered through the same sidecar mechanism an
+# application would use: a labelled ConfigMap per dashboard in the observability
+# namespace. Nothing here touches the Grafana release -- the sidecar's WATCH
+# picks the ConfigMaps up and POSTs the provisioning reload API, so a dashboard
+# change is a commit to this directory and nothing else.
+#
+# One ConfigMap per dashboard rather than one holding all seven: the object
+# limit is 1MiB and node-exporter-full.json alone is ~460KB, so a combined
+# ConfigMap would be one dashboard away from being unappliable. The Application
+# that syncs this directory uses server-side apply for the same reason -- see
+# gitops/observability/apps/templates/dashboards.yaml.
+#
+# The label is what the Grafana sidecar watches for (presence only; the value
+# is never compared). The grafana_folder annotation is the Grafana folder the
+# dashboard lands in. An application shipping its own dashboard writes exactly
+# this shape into its own namespace.
+#
+# The JSON was fetched from grafana.com, then normalised: __inputs/__requires
+# stripped (the import wizard consumes those and file provisioning never runs
+# it), numeric `id` nulled, and each dashboard's datasource variable pinned to
+# the `prometheus` UID -- without that last step they resolve to Grafana's
+# DEFAULT datasource, which in this stack is Tempo. The source annotation
+# records where each came from so a refresh is reproducible:
+#   curl -sL https://grafana.com/api/dashboards/<id>/revisions/latest/download
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: observability
+
+generatorOptions:
+  # Fixed names, so the sidecar sees an update to the same ConfigMap rather
+  # than a new one appearing beside the old.
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+
+configMapGenerator:
+  - name: grafana-dashboard-k8s-views-global
+    files:
+      - k8s-views-global.json
+    options:
+      annotations:
+        grafana_folder: Kubernetes
+        k8s-observability/source: "grafana.com/dashboards/15757 rev 43"
+  - name: grafana-dashboard-k8s-views-namespaces
+    files:
+      - k8s-views-namespaces.json
+    options:
+      annotations:
+        grafana_folder: Kubernetes
+        k8s-observability/source: "grafana.com/dashboards/15758 rev 46"
+  - name: grafana-dashboard-k8s-views-nodes
+    files:
+      - k8s-views-nodes.json
+    options:
+      annotations:
+        grafana_folder: Kubernetes
+        k8s-observability/source: "grafana.com/dashboards/15759 rev 40"
+  - name: grafana-dashboard-k8s-views-pods
+    files:
+      - k8s-views-pods.json
+    options:
+      annotations:
+        grafana_folder: Kubernetes
+        k8s-observability/source: "grafana.com/dashboards/15760 rev 39"
+  - name: grafana-dashboard-k8s-system-api-server
+    files:
+      - k8s-system-api-server.json
+    options:
+      annotations:
+        grafana_folder: Kubernetes
+        k8s-observability/source: "grafana.com/dashboards/15761 rev 21"
+  - name: grafana-dashboard-k8s-system-coredns
+    files:
+      - k8s-system-coredns.json
+    options:
+      annotations:
+        grafana_folder: Kubernetes
+        k8s-observability/source: "grafana.com/dashboards/15762 rev 22"
+  - name: grafana-dashboard-node-exporter-full
+    files:
+      - node-exporter-full.json
+    options:
+      annotations:
+        grafana_folder: Nodes
+        k8s-observability/source: "grafana.com/dashboards/1860 rev 45"

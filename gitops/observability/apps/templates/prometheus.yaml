@@ -1,0 +1,11 @@
+# Wave 1: before Tempo, because Tempo's
+# metrics-generator opens its remote_write connection to prometheus-server as
+# it starts, and before Grafana, whose provisioned datasources name the
+# Service. Neither hard-fails if Prometheus is missing -- they retry or render
+# a broken datasource -- so this ordering is about a clean first boot rather
+# than correctness.
+{{ include "observability.helmApplication" (dict
+  "root" .
+  "name" "prometheus"
+  "wave" 1
+  "chart" .Values.charts.prometheus) }}

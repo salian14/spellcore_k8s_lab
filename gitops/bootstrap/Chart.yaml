@@ -1,0 +1,8 @@
+apiVersion: v2
+name: bootstrap
+description: >-
+  App-of-apps root for the spellcore lab cluster. The k8s_argocd Ansible role
+  points one Argo CD Application at this chart; everything else the cluster
+  runs is reached from here.
+type: application
+version: 0.1.0
