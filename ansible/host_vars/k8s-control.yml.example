@@ -45,6 +45,42 @@
 # the storage prerequisites only.
 # k8s_observability_enabled: true
 
+# --- Argo CD ---
+# Same file, same rules: these override roles/k8s_argocd/defaults/main.yml.
+#
+# The one setting most people will want. Empty (the default) installs Argo CD
+# with no applications; a git URL reachable from the cluster makes the role
+# apply one app-of-apps Application named `bootstrap` pointed at the
+# repository's `bootstrap/` directory, with automated sync, prune and self-heal.
+# Public HTTPS repositories work out of the box (the lab network is NAT'd);
+# private ones need a repo credential Secret in the argocd namespace first.
+# k8s_argocd_bootstrap_repo_url: https://github.com/you/lab-gitops.git
+# k8s_argocd_bootstrap_repo_path: bootstrap
+# k8s_argocd_bootstrap_repo_revision: HEAD
+# k8s_argocd_bootstrap_sync_automated: true
+
+# Login is always `admin`; this is its password. Hashed with bcrypt at render
+# time (needs passlib + bcrypt on the workstation). Bump the mtime when you
+# change it so sessions issued under the old password are invalidated.
+# k8s_argocd_admin_password: lab-argocd
+# k8s_argocd_admin_password_mtime: "2026-09-15T00:00:00Z"
+
+# NodePort the UI/API is reached at on the host browser. 30080 is taken by
+# fathom/fathom-agent, 30300 and 30090 by Grafana and Prometheus.
+# k8s_argocd_server_node_port: 30800
+
+# How often every source repository is re-polled. No webhook can reach the lab,
+# so this is the only way a push lands. Upstream default is 180s.
+# k8s_argocd_reconciliation_timeout: 60s
+
+# Optional components, both off by default -- no SSO provider to federate, and
+# nowhere to send notifications from an isolated network.
+# k8s_argocd_dex_enabled: false
+# k8s_argocd_notifications_enabled: false
+
+# Set to false to skip the role entirely.
+# k8s_argocd_enabled: true
+
 # NOTE: k8s_node_storage_expand runs on the workers too, so its variables do
 # NOT belong in this file -- a host_vars/k8s-control.yml override would apply to
 # the control plane alone and silently leave the workers unexpanded. Put those

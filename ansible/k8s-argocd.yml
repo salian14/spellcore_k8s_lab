@@ -1,0 +1,23 @@
+---
+# Stands up Argo CD -- the GitOps controller that turns a git repository into
+# the cluster's desired state -- in its own `argocd` namespace, exposed on a
+# NodePort, with a known admin password and (optionally) one app-of-apps
+# Application pointed at a bootstrap repository.
+#
+# Runs after k8s-cluster-bootstrap.yml: the cluster has to exist. It is
+# independent of k8s-observability.yml and needs no StorageClass -- Argo CD
+# keeps its state in Kubernetes objects and a non-persistent Redis cache.
+#
+# Manual invocation, from the repo root:
+#   ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
+
+# Cluster-scoped, so it runs once from the control plane against admin.conf.
+# helm_cli is listed again here even though k8s-observability.yml also installs
+# it: the role is idempotent, and this makes the playbook runnable on its own.
+- name: Deploy Argo CD
+  hosts: k8s_control
+  become: true
+  roles:
+    - helm_cli
+    - role: k8s_argocd
+      when: k8s_argocd_enabled | default(true)
