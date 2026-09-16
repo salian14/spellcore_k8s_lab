@@ -1,0 +1,43 @@
+{{- if .Values.observability.enabled }}
+# The observability stack, as one Application whose manifests are themselves
+# Applications (see gitops/observability/apps). Argo CD syncs this, which
+# creates the component Applications, which create the workloads.
+#
+# Wave 1: after the platform stack, whose object store this one flushes to.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability
+  namespace: {{ .Values.argocdNamespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  # Deleting this Application cascades to every component it created rather
+  # than orphaning them. That is what anyone deleting "observability" expects.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.project }}
+  source:
+    repoURL: {{ .Values.repoURL }}
+    targetRevision: {{ .Values.targetRevision }}
+    path: {{ .Values.observability.path }}
+    helm:
+      # Pass the repository and revision down, so the component Applications
+      # read their values files from the same branch this chart came from.
+      parameters:
+        - name: repoURL
+          value: {{ .Values.repoURL | quote }}
+        - name: targetRevision
+          value: {{ .Values.targetRevision | quote }}
+  destination:
+    # Its own manifests are Applications, which must land in the Argo CD
+    # namespace. The components choose their own destination.
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.argocdNamespace }}
+  syncPolicy:
+    automated:
+      # prune removes components whose Application left the repo; selfHeal
+      # reverts kubectl edits made behind Argo CD's back.
+      prune: true
+      selfHeal: true
+{{- end }}

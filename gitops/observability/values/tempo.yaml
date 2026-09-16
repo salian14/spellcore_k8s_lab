@@ -1,5 +1,5 @@
----
-# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+# Values for the grafana/tempo chart, synced by Argo CD from this file (see
+# gitops/observability/apps/templates/tempo.yaml).
 #
 # This is the monolithic `tempo` chart: one StatefulSet, no subchart
 # dependencies. Not `tempo-distributed`, which ships the same appVersion but
@@ -11,7 +11,7 @@ tempo:
   # Go 1.19+ makes pointless.
   memBallastSizeMbs: 0
   reportingEnabled: false
-  retention: {{ k8s_observability_tempo_retention }}
+  retention: 72h
 
   resources:
     requests:
@@ -21,17 +21,39 @@ tempo:
       cpu: 1000m
       memory: 2Gi
 
+  # The S3 credentials -- this stack's own identity on the platform object
+  # store -- come from the object-store-credentials Secret rather than being
+  # written here: extraEnv below lifts them into the container's environment,
+  # and -config.expand-env (extraArgs) substitutes the ${...} placeholders
+  # when Tempo reads its config. This file therefore carries no secret.
+  extraArgs:
+    # Renders as -config.expand-env=true. The chart formats this map as
+    # -<key>=<value>, so no leading dash here.
+    config.expand-env: "true"
+  extraEnv:
+    - name: S3_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: object-store-credentials
+          key: access-key
+    - name: S3_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: object-store-credentials
+          key: secret-key
+
   storage:
     trace:
       # Chart default is "local", which would keep every block on the node.
       backend: s3
       s3:
-        bucket: {{ k8s_observability_tempo_bucket }}
+        bucket: tempo
         # Host:port with no scheme -- Tempo's S3 client takes the scheme from
         # the `insecure` flag below, and a scheme here fails to connect.
-        endpoint: {{ k8s_observability_minio_service }}:9000
-        access_key: "{{ k8s_observability_minio_root_user }}"
-        secret_key: "{{ k8s_observability_minio_root_password }}"
+        # The platform object store; see gitops/platform/object-store.
+        endpoint: object-store.platform.svc.cluster.local:8333
+        access_key: ${S3_ACCESS_KEY_ID}
+        secret_key: ${S3_SECRET_ACCESS_KEY}
         insecure: true
         forcepathstyle: true
         region: us-east-1
@@ -54,9 +76,9 @@ tempo:
     # to rot at a value nothing reads.
     processor:
       local_blocks:
-        # Flush the generator's completed blocks to MinIO. Without this its data
-        # is memory-only, so metrics queries see nothing older than the current
-        # block and lose everything on a pod restart.
+        # Flush the generator's completed blocks to the object store. Without
+        # this its data is memory-only, so metrics queries see nothing older
+        # than the current block and lose everything on a pod restart.
         flush_to_storage: true
         # Chart/Tempo default is true, which counts only server spans. The
         # drilldown views break down every span, including client and internal.
@@ -73,11 +95,15 @@ tempo:
       # PVC. /var/tempo is the persistent mount, same volume as the trace WAL.
       path: /var/tempo/generator/wal
       # The generator's own output goes here. Prometheus only accepts it because
-      # prometheus-values.yaml.j2 sets the web.enable-remote-write-receiver
-      # flag; without that flag this endpoint 404s and the generator retries
-      # forever with nothing to show for it.
+      # prometheus.yaml sets the web.enable-remote-write-receiver flag; without
+      # that flag this endpoint 404s and the generator retries forever with
+      # nothing to show for it.
+      #
+      # `prometheus-server`, not `prometheus`: the chart names the server
+      # Service <release>-server. Port 80, not 9090: 9090 is the container
+      # port, published on servicePort 80.
       remote_write:
-        - url: "http://{{ k8s_observability_prometheus_service }}:{{ k8s_observability_prometheus_http_port }}/api/v1/write"
+        - url: "http://prometheus-server.observability.svc.cluster.local:80/api/v1/write"
           # Carries the trace_id exemplars that let a spike on a span-metrics
           # panel in Grafana jump straight to a trace that caused it. Prometheus
           # drops exemplars unless it was started with
@@ -110,11 +136,12 @@ tempo:
   # Helm merges maps, so the idle Jaeger and OpenCensus listeners are harmless;
   # only OTLP is actually written to, by the collector gateway.
 
-# WAL and not-yet-flushed blocks only; everything durable is in MinIO.
+# WAL and not-yet-flushed blocks only; everything durable is in the object
+# store.
 persistence:
   enabled: true
-  size: {{ k8s_observability_tempo_pvc_size }}
-  storageClassName: {{ k8s_observability_storage_class }}
+  size: 10Gi
+  storageClassName: local-path
 
 # Grafana queries Tempo natively, so the bundled Jaeger UI is dead weight.
 tempoQuery:

@@ -1,0 +1,27 @@
+# Where every child Application reads its manifests from. Both values are
+# overridden by the bootstrap Application the k8s_argocd role applies (as Helm
+# parameters, from k8s_argocd_bootstrap_repo_url / _repo_revision), so the
+# whole tree follows whichever branch that Application was pointed at and a
+# feature branch can be tested by changing one Ansible variable rather than
+# editing every file below. The defaults here only matter when the chart is
+# rendered by hand.
+repoURL: https://github.com/salian14/spellcore_k8s_lab.git
+targetRevision: bifrost
+
+# Applications must live in Argo CD's own namespace; workloads pick their own.
+argocdNamespace: argocd
+# The chart-created `default` AppProject has no restrictions.
+project: default
+
+# One entry per stack. Each is itself an app-of-apps: a Helm chart under
+# gitops/<stack>/apps whose templates are the Applications for that stack's
+# components, so the stack's sync order lives next to the stack.
+#
+# The platform stack -- shared services that application stacks consume, the
+# object store today -- syncs first (wave 0); application stacks follow.
+platform:
+  enabled: true
+  path: gitops/platform/apps
+observability:
+  enabled: true
+  path: gitops/observability/apps

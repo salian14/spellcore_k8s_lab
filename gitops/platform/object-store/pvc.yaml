@@ -1,0 +1,19 @@
+# The whole of the object store's state: volumes, filer metadata, master
+# metadata -- `weed mini` keeps all of it under one -dir. local-path volumes
+# are directories on whichever node the pod first lands on, so this pins the
+# pod to that node for life; see gitops/README.md.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: object-store-data
+  namespace: platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      # Not enforced by local-path-provisioner -- a directory has no quota --
+      # which is why deployment.yaml caps SeaweedFS at 20 volumes of 1GiB
+      # itself. Keep the two in step.
+      storage: 20Gi

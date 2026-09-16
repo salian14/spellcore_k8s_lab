@@ -1,62 +1,31 @@
 ---
 # Copy this file to host_vars/k8s-control.yml (untracked/local) and uncomment
 # whatever you want to override. Anything left commented keeps the role's
-# default from roles/k8s_observability/defaults/main.yml.
+# default from roles/k8s_argocd/defaults/main.yml.
 #
-# This is the intended place to change the observability stack's credentials.
-# The defaults are plaintext lab values -- see the comment above them in
-# roles/k8s_observability/defaults/main.yml for why.
-
-# --- credentials ---
-# minio_root_password and grafana_admin_password must be set explicitly, not
-# left blank: MinIO's chart generates its own when they're empty, which rotates
-# them on every re-provision and breaks Tempo and Loki with S3 auth errors.
-# k8s_observability_minio_root_user: lab-minio
-# k8s_observability_minio_root_password: lab-observability
-# k8s_observability_grafana_admin_user: admin
-# k8s_observability_grafana_admin_password: lab-observability
-
-# --- exposure ---
-# NodePorts these are reached at on the host browser. 30080 is taken by
-# fathom/fathom-agent.
-# k8s_observability_grafana_node_port: 30300
-# k8s_observability_prometheus_node_port: 30090
-
-# --- retention and volume sizes ---
-# Note that prometheus_retention is bounded by prometheus_pvc_size and nothing
-# else: unlike Tempo and Loki, Prometheus has no object-storage tier behind it,
-# so its volume holds the only copy. Raising retention without also raising the
-# volume just means the TSDB starts evicting earlier than the setting claims.
-# k8s_observability_tempo_retention: 72h
-# k8s_observability_loki_retention: 168h
-# k8s_observability_prometheus_retention: 15d
-# k8s_observability_minio_pvc_size: 20Gi
-# k8s_observability_tempo_pvc_size: 10Gi
-# k8s_observability_loki_pvc_size: 10Gi
-# k8s_observability_grafana_pvc_size: 2Gi
-# k8s_observability_prometheus_pvc_size: 20Gi
-
-# --- scrape tuning ---
-# Global scrape interval for every Prometheus target. The chart default is 1m.
-# k8s_observability_prometheus_scrape_interval: 30s
-
-# --- skip switch ---
-# Set to false to leave the Helm releases alone, e.g. to re-run the playbook for
-# the storage prerequisites only.
-# k8s_observability_enabled: true
+# NOTE: the observability stack is no longer configured here. Its values files,
+# credentials and dashboards live under gitops/observability/ and are deployed
+# by Argo CD, so changing them is a commit to that directory -- see
+# gitops/README.md. The only Ansible-side knobs left are Argo CD's own, below,
+# plus which branch of this repository Argo CD deploys from.
 
 # --- Argo CD ---
-# Same file, same rules: these override roles/k8s_argocd/defaults/main.yml.
-#
-# The one setting most people will want. Empty (the default) installs Argo CD
-# with no applications; a git URL reachable from the cluster makes the role
-# apply one app-of-apps Application named `bootstrap` pointed at the
-# repository's `bootstrap/` directory, with automated sync, prune and self-heal.
-# Public HTTPS repositories work out of the box (the lab network is NAT'd);
-# private ones need a repo credential Secret in the argocd namespace first.
-# k8s_argocd_bootstrap_repo_url: https://github.com/you/lab-gitops.git
-# k8s_argocd_bootstrap_repo_path: bootstrap
-# k8s_argocd_bootstrap_repo_revision: HEAD
+# Which branch (or tag, or commit) of this repository the cluster runs. The
+# default is `bifrost`, the test/dev branch. To try a feature branch on the
+# lab cluster, set it here and re-run ansible/k8s-argocd.yml: the bootstrap
+# Application is re-applied and every Application under gitops/ follows the
+# new revision on Argo CD's next poll.
+# k8s_argocd_bootstrap_repo_revision: agent/feat/my-change
+
+# The repository itself and the chart path inside it. Point these elsewhere
+# only if you fork the GitOps tree out of this repo. Set the URL to "" to
+# install Argo CD with no applications at all.
+# k8s_argocd_bootstrap_repo_url: https://github.com/salian14/spellcore_k8s_lab.git
+# k8s_argocd_bootstrap_repo_path: gitops/bootstrap
+
+# Automated sync with prune and self-heal on the bootstrap Application. Set
+# false to review the first sync by hand in the UI. The component
+# Applications under gitops/ carry their own sync policy regardless.
 # k8s_argocd_bootstrap_sync_automated: true
 
 # Login is always `admin`; this is its password. Hashed with bcrypt at render
@@ -66,7 +35,8 @@
 # k8s_argocd_admin_password_mtime: "2026-09-15T00:00:00Z"
 
 # NodePort the UI/API is reached at on the host browser. 30080 is taken by
-# fathom/fathom-agent, 30300 and 30090 by Grafana and Prometheus.
+# fathom/fathom-agent, 30300 and 30090 by Grafana and Prometheus (both set in
+# gitops/observability/values/).
 # k8s_argocd_server_node_port: 30800
 
 # How often every source repository is re-polled. No webhook can reach the lab,
@@ -80,6 +50,12 @@
 
 # Set to false to skip the role entirely.
 # k8s_argocd_enabled: true
+
+# --- storage ---
+# Set to false to skip installing local-path-provisioner from
+# k8s-cluster-bootstrap.yml. Everything Argo CD deploys that claims a volume
+# then sits Pending until some other StorageClass named `local-path` exists.
+# k8s_local_path_storage_enabled: true
 
 # NOTE: k8s_node_storage_expand runs on the workers too, so its variables do
 # NOT belong in this file -- a host_vars/k8s-control.yml override would apply to
