@@ -1,0 +1,57 @@
+---
+# The same route with the Kubernetes Gateway API, which Istio treats as the
+# preferred ingress API. Two differences from gateway.yaml worth knowing:
+#
+# 1. A Gateway API `Gateway` makes Istio deploy a NEW gateway Deployment and
+#    Service for it -- it does not bind to the istio-ingressgateway the
+#    k8s_istio role installed. The Service would be a LoadBalancer, which in
+#    this lab sits <pending> forever, hence the annotation below asking for a
+#    NodePort instead. The port is allocated, not fixed: read it back with
+#    `kubectl -n default get svc httpbin-gateway-istio`.
+#
+#    Attaching a Gateway API Gateway to an existing deployment ("manual
+#    deployment") is possible but needs the gateway pod labelled with the
+#    Gateway's name and the Service in the Gateway's namespace, so it is not
+#    a drop-in for the shared NodePort gateway. See
+#    https://istio.io/latest/docs/tasks/traffic-management/ingress/gateway-api/#manual-deployment
+#
+# 2. The rewrite is a filter on the route rather than a field on the match.
+#
+# Apply gateway.yaml OR this file, not both -- they both claim /httpbin/.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: httpbin-gateway
+  annotations:
+    networking.istio.io/service-type: NodePort
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: httpbin
+spec:
+  parentRefs:
+    - name: httpbin-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /httpbin/
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: httpbin
+          port: 8000

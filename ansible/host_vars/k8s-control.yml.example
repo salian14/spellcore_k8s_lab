@@ -45,6 +45,43 @@
 # the storage prerequisites only.
 # k8s_observability_enabled: true
 
+# --- Istio ---
+# Same file, same rules: these override roles/k8s_istio/defaults/main.yml.
+
+# Namespaces that get istio-injection=enabled (created if missing). Pods that
+# already exist there need a restart to pick up a sidecar. Keep the platform
+# namespaces (observability, kube-system, istio-*) out.
+# k8s_istio_injection_namespaces:
+#   - default
+
+# NodePorts the ingress gateway answers on from the host browser. 30080 is
+# taken by fathom/fathom-agent, 30300/30090 by Grafana and Prometheus.
+# k8s_istio_gateway_node_port_http: 30880
+# k8s_istio_gateway_node_port_https: 30843
+
+# Mesh tracing into the observability stack's collector. Turn off together
+# with k8s_observability_enabled: false, or the sidecars have nowhere to send
+# spans. Sampling is a percentage; 100 is right for a lab.
+# k8s_istio_tracing_enabled: true
+# k8s_istio_tracing_sampling_percentage: 100
+
+# Envoy access logs on every proxy's stdout. Empty string to disable.
+# k8s_istio_access_log_file: /dev/stdout
+
+# Sizing. The chart's istiod defaults (500m/2Gi) are for hundreds of services.
+# k8s_istio_istiod_resources:
+#   requests: {cpu: 250m, memory: 512Mi}
+#   limits: {memory: 1Gi}
+# k8s_istio_proxy_resources:
+#   requests: {cpu: 50m, memory: 64Mi}
+#   limits: {cpu: "1", memory: 512Mi}
+
+# Kubernetes Gateway API CRDs (standard channel). Istio doesn't ship them.
+# k8s_istio_gateway_api_enabled: true
+
+# Set to false to skip the role entirely.
+# k8s_istio_enabled: true
+
 # NOTE: k8s_node_storage_expand runs on the workers too, so its variables do
 # NOT belong in this file -- a host_vars/k8s-control.yml override would apply to
 # the control plane alone and silently leave the workers unexpanded. Put those

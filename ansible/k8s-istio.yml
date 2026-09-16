@@ -1,0 +1,24 @@
+---
+# Stands up the Istio service mesh in sidecar mode -- istio-base (CRDs), istiod
+# (control plane) and an ingress gateway on a NodePort -- plus the Kubernetes
+# Gateway API CRDs, a mesh-wide Telemetry resource that sends spans to the
+# lab's OpenTelemetry collector, and sidecar injection on the `default`
+# namespace.
+#
+# Runs after k8s-cluster-bootstrap.yml: the cluster has to exist. It needs
+# nothing from k8s-observability.yml to install, but the tracing it configures
+# points at that stack's collector, so it runs after it for a clean first boot.
+#
+# Manual invocation, from the repo root:
+#   ansible-playbook -i terraform/inventory.ini ansible/k8s-istio.yml
+
+# Cluster-scoped, so it runs once from the control plane against admin.conf.
+# helm_cli is listed again here even though k8s-observability.yml also installs
+# it: the role is idempotent, and this makes the playbook runnable on its own.
+- name: Deploy the Istio service mesh
+  hosts: k8s_control
+  become: true
+  roles:
+    - helm_cli
+    - role: k8s_istio
+      when: k8s_istio_enabled | default(true)
