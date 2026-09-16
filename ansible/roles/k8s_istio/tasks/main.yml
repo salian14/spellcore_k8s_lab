@@ -1,0 +1,311 @@
+---
+- name: Wait for the Kubernetes API server to become responsive
+  ansible.builtin.command: "kubectl --kubeconfig={{ k8s_istio_kubeconfig }} get nodes"
+  register: k8s_istio_api_check
+  until: k8s_istio_api_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+# --- namespaces ---
+
+- name: Check for the Istio namespaces
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }} get namespace {{ item }}
+  loop:
+    - "{{ k8s_istio_namespace }}"
+    - "{{ k8s_istio_ingress_namespace }}"
+  register: k8s_istio_namespace_check
+  changed_when: false
+  failed_when: false
+
+- name: Create the Istio namespaces
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }} create namespace {{ item.item }}
+  loop: "{{ k8s_istio_namespace_check.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: item.rc != 0
+
+# --- helm repository ---
+
+# `helm repo list` exits non-zero when no repositories are configured at all,
+# hence failed_when: false and the default('[]') below.
+- name: List the configured helm repositories
+  ansible.builtin.command: "{{ k8s_istio_helm_binary }} repo list -o json"
+  register: k8s_istio_repo_list
+  changed_when: false
+  failed_when: false
+
+- name: Add the istio helm repository
+  ansible.builtin.command: >-
+    {{ k8s_istio_helm_binary }} repo add
+    {{ k8s_istio_helm_repo_name }} {{ k8s_istio_helm_repo_url }}
+  changed_when: true
+  when: >-
+    k8s_istio_helm_repo_name not in (k8s_istio_repo_list.stdout | default('[]', true)
+                                      | from_json | map(attribute='name') | list)
+
+- name: Refresh the helm repository indexes
+  ansible.builtin.command: "{{ k8s_istio_helm_binary }} repo update"
+  changed_when: false
+
+# --- rendered values files ---
+
+# 0755: no credentials in anything rendered here.
+- name: Ensure the values directory exists
+  ansible.builtin.file:
+    path: "{{ k8s_istio_values_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Registered because the .changed of each is half of the idempotence gate on
+# the corresponding helm release below.
+- name: Render the istio-base values file
+  ansible.builtin.template:
+    src: base-values.yaml.j2
+    dest: "{{ k8s_istio_values_dir }}/base-values.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: k8s_istio_base_values
+
+- name: Render the istiod values file
+  ansible.builtin.template:
+    src: istiod-values.yaml.j2
+    dest: "{{ k8s_istio_values_dir }}/istiod-values.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: k8s_istio_istiod_values
+
+- name: Render the ingress gateway values file
+  ansible.builtin.template:
+    src: gateway-values.yaml.j2
+    dest: "{{ k8s_istio_values_dir }}/gateway-values.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: k8s_istio_gateway_values
+
+# --- Kubernetes Gateway API CRDs ---
+#
+# Before istiod, so its Gateway API controller finds the CRDs at startup rather
+# than on its next informer resync. Istio does cope with them arriving later;
+# this just makes the first boot clean.
+
+- name: Download the Gateway API CRD bundle
+  ansible.builtin.get_url:
+    url: "{{ k8s_istio_gateway_api_manifest_url }}"
+    dest: "{{ k8s_istio_gateway_api_manifest_path }}"
+    mode: "0644"
+  when: k8s_istio_gateway_api_enabled
+
+# Server-side, and it has to be: several of these CRDs are over the 256KB
+# annotation limit a client-side apply would trip on, same trap as the
+# dashboard ConfigMaps in k8s_observability. `unchanged` in the output is the
+# only idempotence signal apply gives.
+- name: Apply the Gateway API CRDs
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }}
+    apply --server-side --force-conflicts
+    -f {{ k8s_istio_gateway_api_manifest_path }}
+  register: k8s_istio_gateway_api_apply
+  changed_when: "'unchanged' not in k8s_istio_gateway_api_apply.stdout"
+  when: k8s_istio_gateway_api_enabled
+
+# --- releases, in dependency order ---
+#
+# Each release follows the same two-task shape as k8s_observability: a
+# `helm status` guard, then an `upgrade --install` gated on "release absent OR
+# rendered values changed". `helm upgrade --install` always exits 0 and mints a
+# new revision on every invocation, so without the gate every provisioning
+# re-run would report `changed` and push a pointless revision.
+#
+# base carries the CRDs, so it must complete before istiod; istiod runs the
+# injection webhook the gateway pod is created through, so it must be Ready
+# (--wait) before the gateway chart is installed.
+
+- name: Check for an existing istio-base release
+  ansible.builtin.command: >-
+    {{ k8s_istio_helm_binary }} status {{ k8s_istio_base_release }}
+    --kubeconfig={{ k8s_istio_kubeconfig }}
+    --namespace {{ k8s_istio_namespace }}
+  register: k8s_istio_base_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade istio-base
+  ansible.builtin.command: >-
+    {{ k8s_istio_helm_binary }} upgrade --install {{ k8s_istio_base_release }}
+    {{ k8s_istio_base_chart }}
+    --version {{ k8s_istio_version }}
+    --kubeconfig={{ k8s_istio_kubeconfig }}
+    --namespace {{ k8s_istio_namespace }}
+    --values {{ k8s_istio_values_dir }}/base-values.yaml
+    --wait --timeout {{ k8s_istio_helm_timeout }}
+  register: k8s_istio_base_install
+  changed_when: k8s_istio_base_install.rc == 0
+  when: >-
+    k8s_istio_base_status.rc != 0
+    or k8s_istio_base_values.changed
+
+- name: Check for an existing istiod release
+  ansible.builtin.command: >-
+    {{ k8s_istio_helm_binary }} status {{ k8s_istio_istiod_release }}
+    --kubeconfig={{ k8s_istio_kubeconfig }}
+    --namespace {{ k8s_istio_namespace }}
+  register: k8s_istio_istiod_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade istiod
+  ansible.builtin.command: >-
+    {{ k8s_istio_helm_binary }} upgrade --install {{ k8s_istio_istiod_release }}
+    {{ k8s_istio_istiod_chart }}
+    --version {{ k8s_istio_version }}
+    --kubeconfig={{ k8s_istio_kubeconfig }}
+    --namespace {{ k8s_istio_namespace }}
+    --values {{ k8s_istio_values_dir }}/istiod-values.yaml
+    --wait --timeout {{ k8s_istio_helm_timeout }}
+  register: k8s_istio_istiod_install
+  changed_when: k8s_istio_istiod_install.rc == 0
+  when: >-
+    k8s_istio_istiod_status.rc != 0
+    or k8s_istio_istiod_values.changed
+
+# Belt and braces on top of --wait: the gate above skips the helm call on a
+# no-op run, and this is what then confirms the control plane is actually
+# serving rather than assuming it from a green `helm status`.
+- name: Wait for istiod to become available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }}
+    -n {{ k8s_istio_namespace }}
+    rollout status deployment/{{ k8s_istio_istiod_release }}
+    --timeout={{ k8s_istio_rollout_timeout }}s
+  changed_when: false
+
+- name: Check for an existing ingress gateway release
+  ansible.builtin.command: >-
+    {{ k8s_istio_helm_binary }} status {{ k8s_istio_gateway_release }}
+    --kubeconfig={{ k8s_istio_kubeconfig }}
+    --namespace {{ k8s_istio_ingress_namespace }}
+  register: k8s_istio_gateway_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade the ingress gateway
+  ansible.builtin.command: >-
+    {{ k8s_istio_helm_binary }} upgrade --install {{ k8s_istio_gateway_release }}
+    {{ k8s_istio_gateway_chart }}
+    --version {{ k8s_istio_version }}
+    --kubeconfig={{ k8s_istio_kubeconfig }}
+    --namespace {{ k8s_istio_ingress_namespace }}
+    --values {{ k8s_istio_values_dir }}/gateway-values.yaml
+    --wait --timeout {{ k8s_istio_helm_timeout }}
+  register: k8s_istio_gateway_install
+  changed_when: k8s_istio_gateway_install.rc == 0
+  when: >-
+    k8s_istio_gateway_status.rc != 0
+    or k8s_istio_gateway_values.changed
+
+- name: Wait for the ingress gateway to become available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }}
+    -n {{ k8s_istio_ingress_namespace }}
+    rollout status deployment/{{ k8s_istio_gateway_release }}
+    --timeout={{ k8s_istio_rollout_timeout }}s
+  changed_when: false
+
+# --- mesh-wide telemetry ---
+#
+# After istiod: the Telemetry CRD comes from istio-base, and the validating
+# webhook that admits the resource is served by istiod.
+
+- name: Render the mesh-wide Telemetry manifest
+  ansible.builtin.template:
+    src: telemetry.yaml.j2
+    dest: "{{ k8s_istio_values_dir }}/telemetry.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  when: k8s_istio_tracing_enabled
+
+- name: Apply the mesh-wide Telemetry resource
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }}
+    apply -f {{ k8s_istio_values_dir }}/telemetry.yaml
+  register: k8s_istio_telemetry_apply
+  changed_when: "'unchanged' not in k8s_istio_telemetry_apply.stdout"
+  when: k8s_istio_tracing_enabled
+
+# --- sidecar injection ---
+#
+# Read the label first so an already-labelled namespace is a no-op rather than
+# a `changed` every run. Namespaces that don't exist yet are created: labelling
+# a namespace that will hold workloads later is the normal case.
+
+- name: Check for the injection namespaces
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }} get namespace {{ item }}
+  loop: "{{ k8s_istio_injection_namespaces }}"
+  register: k8s_istio_injection_namespace_check
+  changed_when: false
+  failed_when: false
+
+- name: Create the injection namespaces
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }} create namespace {{ item.item }}
+  loop: "{{ k8s_istio_injection_namespace_check.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: item.rc != 0
+
+- name: Read the injection label on each namespace
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }}
+    get namespace {{ item }}
+    -o jsonpath={.metadata.labels.istio-injection}
+  loop: "{{ k8s_istio_injection_namespaces }}"
+  register: k8s_istio_injection_label
+  changed_when: false
+
+- name: Enable sidecar injection on the namespaces
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }}
+    label namespace {{ item.item }} istio-injection=enabled --overwrite
+  loop: "{{ k8s_istio_injection_label.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: item.stdout | trim != "enabled"
+
+# --- report ---
+
+- name: Read back the Istio workloads per namespace
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_istio_kubeconfig }}
+    get pods,svc -n {{ item }}
+  loop:
+    - "{{ k8s_istio_namespace }}"
+    - "{{ k8s_istio_ingress_namespace }}"
+  register: k8s_istio_workloads
+  changed_when: false
+
+- name: Report the Istio endpoints
+  ansible.builtin.debug:
+    msg:
+      - "Istio {{ k8s_istio_version }}, sidecar mode, control plane in {{ k8s_istio_namespace }}"
+      - "Ingress gateway: {{ k8s_istio_gateway_url }} (HTTPS on NodePort {{ k8s_istio_gateway_node_port_https }})"
+      - "Gateway selector: istio: {{ k8s_istio_gateway_release | regex_replace('^istio-', '') }}"
+      - "Sidecar injection enabled in: {{ k8s_istio_injection_namespaces | join(', ') }}"
+      - >-
+        Tracing: {{ 'spans to ' ~ k8s_istio_otel_collector_service ~ ':' ~ k8s_istio_otel_collector_port
+        ~ ' at ' ~ k8s_istio_tracing_sampling_percentage ~ '% sampling'
+        if k8s_istio_tracing_enabled else 'disabled' }}
+      - "Gateway API CRDs: {{ k8s_istio_gateway_api_version if k8s_istio_gateway_api_enabled else 'not installed' }}"
+      - "{{ k8s_istio_workloads.results | map(attribute='stdout_lines') | list }}"

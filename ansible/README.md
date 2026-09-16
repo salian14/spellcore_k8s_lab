@@ -26,6 +26,11 @@ which install Helm and a default StorageClass and deploy the
 Grafana/Tempo/Loki/Prometheus/MinIO/OTel telemetry backend — see
 [Observability roles](#observability-roles). Terraform invokes these too.
 
+And `k8s_istio`, which installs the Istio service mesh in sidecar mode with an
+ingress gateway on a NodePort, the Kubernetes Gateway API CRDs, mesh tracing
+into the lab's collector and sidecar injection on `default` — see
+[Istio role](#istio-role). Also invoked by Terraform, last.
+
 ## Layout
 
 ```
@@ -37,11 +42,12 @@ Grafana/Tempo/Loki/Prometheus/MinIO/OTel telemetry backend — see
     ├── k8s-cluster-bootstrap.yml  # entry point for the five cluster-bootstrap roles below, invoked by terraform apply
     ├── k8s-registry-trust.yml   # entry point for containerd_registry_trust, invoked by terraform apply
     ├── k8s-observability.yml    # entry point for the three observability roles below, invoked by terraform apply
+    ├── k8s-istio.yml            # entry point for helm_cli + k8s_istio, invoked by terraform apply
     ├── group_vars/
     │   └── all.yml              # lab network/registry addresses shared by every play
     ├── host_vars/
     │   ├── localhost.yml.example    # copy to localhost.yml to override the lab_workstation role's defaults
-    │   └── k8s-control.yml.example  # copy to k8s-control.yml to override observability credentials/ports/retention
+    │   └── k8s-control.yml.example  # copy to k8s-control.yml to override observability/Istio credentials, ports, sizing
     └── roles/
         ├── lab_workstation/
         │   ├── defaults/main.yml   # all configurable variables
@@ -93,15 +99,24 @@ Grafana/Tempo/Loki/Prometheus/MinIO/OTel telemetry backend — see
         │   ├── defaults/main.yml   # all configurable variables
         │   ├── meta/main.yml
         │   └── tasks/main.yml
-        └── k8s_observability/
+        ├── k8s_observability/
+        │   ├── defaults/main.yml   # all configurable variables
+        │   ├── meta/main.yml
+        │   ├── files/
+        │   │   └── dashboards/     # the seven bundled dashboard JSON files
+        │   ├── tasks/
+        │   │   ├── main.yml
+        │   │   └── dashboards.yml  # renders each dashboard as a labelled ConfigMap
+        │   └── templates/          # one values file per Helm release, plus the ConfigMap template
+        └── k8s_istio/
             ├── defaults/main.yml   # all configurable variables
             ├── meta/main.yml
-            ├── files/
-            │   └── dashboards/     # the seven bundled dashboard JSON files
-            ├── tasks/
-            │   ├── main.yml
-            │   └── dashboards.yml  # renders each dashboard as a labelled ConfigMap
-            └── templates/          # one values file per Helm release, plus the ConfigMap template
+            ├── tasks/main.yml
+            └── templates/
+                ├── base-values.yaml.j2     # istio/base
+                ├── istiod-values.yaml.j2   # istio/istiod: sizing, meshConfig, tracing provider
+                ├── gateway-values.yaml.j2  # istio/gateway: NodePort Service, sizing
+                └── telemetry.yaml.j2       # mesh-wide Telemetry resource turning tracing on
 ```
 
 `group_vars/all.yml` sits next to the playbooks, so every play here picks it
@@ -1078,3 +1093,162 @@ All variables live in `ansible/roles/k8s_observability/defaults/main.yml`.
   render. It installs and works; it just isn't receiving updates, so the
   eventual migration is to the Grafana operator's `Grafana` CRD. Not a
   today problem, but don't spend time looking for a newer chart version.
+
+## Istio role
+
+Installs the [Istio](https://istio.io/) service mesh, **sidecar mode**, from
+the three upstream charts at `istio-release.storage.googleapis.com/charts`:
+`istio/base` (CRDs, reader RBAC, webhook config), `istio/istiod` (the control
+plane) and `istio/gateway` (one ingress gateway). All three are pinned to the
+same version — Istio publishes them in lockstep and mixing versions is
+unsupported. Same Helm pattern as `k8s_observability`: values rendered to
+`/root/istio/`, a `helm status` guard per release, and an `upgrade --install`
+gated on "release absent or values changed" so a re-run is `changed=0`.
+
+### How it's invoked
+
+`terraform apply` runs `k8s-istio.yml` last, after `k8s-observability.yml`
+(see `../terraform/provision.tf`). Nothing in the install depends on the
+telemetry stack, but the mesh tracing this role turns on points at its
+collector, so the order gives a clean first boot. The playbook lists
+`helm_cli` again before `k8s_istio` — idempotent, and it makes the playbook
+runnable on its own.
+
+Re-run by hand against the running VMs from the repo root:
+
+```bash
+ansible-playbook -i terraform/inventory.ini ansible/k8s-istio.yml
+```
+
+### What the role does, in order
+
+1. Waits for the API server; creates `istio-system` and `istio-ingress`; adds
+   the `istio` chart repository if missing; renders the three values files.
+2. **Gateway API CRDs** (`kubernetes-sigs/gateway-api` v1.6.0, standard
+   channel) via `kubectl apply --server-side`. Before istiod, so its Gateway
+   API controller sees them at startup. Server-side because the bundle is
+   ~1.2MB and several CRDs individually exceed the 256KB
+   `last-applied-configuration` annotation a client-side apply would try to
+   write — the same trap as the dashboard ConfigMaps.
+3. **`istio-base`** into `istio-system`. Carries the Istio CRDs, so it must
+   land before istiod, and is its own release so the CRDs survive an istiod
+   uninstall.
+4. **`istiod`** into `istio-system`, `--wait`. One replica, no HPA, requests
+   trimmed from the chart's 500m/2Gi to 250m/512Mi. It runs the sidecar
+   injection webhook, so it must be Ready before anything that gets injected —
+   including the gateway.
+5. **`istio-ingressgateway`** into `istio-ingress`, `--wait`. A `NodePort`
+   Service (HTTP `30880`, HTTPS `30843`) — the chart's default `LoadBalancer`
+   would sit `<pending>` with no MetalLB. The release name is load-bearing: the
+   chart derives the Deployment/Service name and the `istio: ingressgateway`
+   selector label (release name minus the `istio-` prefix) from it, and that
+   label is what every classic `Gateway` resource selects on.
+6. **Mesh-wide `Telemetry`** named `mesh-default` in `istio-system`, enabling
+   tracing through the `otel-lab` provider declared in `meshConfig` — spans go
+   over OTLP/gRPC to `otel-collector.observability:4317`, which forwards them
+   to Tempo. Applied after istiod because istiod serves the validating webhook
+   that admits it.
+7. **Sidecar injection**: labels each namespace in
+   `k8s_istio_injection_namespaces` (default: `default`) with
+   `istio-injection=enabled`, creating it first if needed, and only when the
+   label isn't already there. Only pods created *after* the label get a
+   sidecar; existing ones need a restart.
+8. Reports the gateway URL, the selector label, the injection namespaces and
+   the workloads.
+
+### Why sidecar mode, and what's left out
+
+- **Sidecar, not ambient.** Ambient (ztunnel + waypoints) is lighter per pod
+  but adds a DaemonSet, the CNI agent and a second data-plane model; sidecar
+  is what the bulk of the documentation and every Istio feature assume, and it
+  needs nothing on the nodes. Moving to ambient later means adding the `cni`
+  and `ztunnel` charts, not redoing this role.
+- **No `istio-cni`.** In sidecar mode it only replaces the `istio-init`
+  container's iptables step with a node agent. kubeadm clusters permit the
+  `NET_ADMIN` init container, so the default path works.
+- **mTLS stays `PERMISSIVE`** (the mesh default). Meshed pods talk mTLS to each
+  other and still accept plaintext from unmeshed ones — the observability
+  namespace, for one, isn't injected. `STRICT` is a one-line
+  `PeerAuthentication` when wanted.
+- **No Kiali.** It would be a fourth UI on a lab that already has Grafana; the
+  same `istio_requests_total` series it graphs are in Prometheus.
+- **Metrics need no wiring.** `enablePrometheusMerge` (the default, kept
+  explicit) has every sidecar and the gateway expose Envoy's stats merged with
+  the app's own on `:15020` and annotates the pod `prometheus.io/scrape`, which
+  is the job the lab's Prometheus already runs.
+- **Envoy access logs go to stdout** (`accessLogFile: /dev/stdout`; off
+  upstream). `kubectl logs <pod> -c istio-proxy` then shows every request,
+  which is worth the log volume in a lab.
+
+### `k8s_istio` role variables
+
+All variables live in `ansible/roles/k8s_istio/defaults/main.yml`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `k8s_istio_enabled` | `true` | Set `false` to skip the role (checked as a `when:` on the role in `k8s-istio.yml`). |
+| `k8s_istio_kubeconfig` | `/etc/kubernetes/admin.conf` | Kubeconfig passed to both `kubectl` and `helm`. |
+| `k8s_istio_helm_binary` | `/usr/local/bin/helm` | Binary installed by `helm_cli`. |
+| `k8s_istio_helm_timeout` | `10m` | `--timeout` on each `helm upgrade --install --wait`. |
+| `k8s_istio_namespace` | `istio-system` | Control-plane namespace. Every Istio default assumes this name. |
+| `k8s_istio_ingress_namespace` | `istio-ingress` | Ingress gateway namespace, separate from the control plane as upstream recommends. |
+| `k8s_istio_values_dir` | `/root/istio` | Where values files and manifests are rendered. `0755` — nothing here carries credentials. |
+| `k8s_istio_helm_repo_name` / `_url` | `istio` / `https://istio-release.storage.googleapis.com/charts` | Chart repository, added if absent. |
+| `k8s_istio_version` | `1.30.4` | One pinned version for all three charts. Istio 1.30 supports Kubernetes 1.32–1.36. |
+| `k8s_istio_base_chart` / `_istiod_chart` / `_gateway_chart` | `istio/base` / `istio/istiod` / `istio/gateway` | The three charts. |
+| `k8s_istio_base_release` / `_istiod_release` | `istio-base` / `istiod` | Release names, upstream conventions. `istiod` is also the Deployment waited on. |
+| `k8s_istio_gateway_release` | `istio-ingressgateway` | Release name **and** the gateway's Deployment/Service name **and**, minus `istio-`, its `istio:` selector label. Change it and every `Gateway` selector changes with it. |
+| `k8s_istio_injection_namespaces` | `[default]` | Namespaces labelled `istio-injection=enabled`. Created if missing. Keep platform namespaces out. |
+| `k8s_istio_istiod_resources` | 250m/512Mi, limit 1Gi | istiod requests/limits. The chart's 500m/2Gi is sized for hundreds of services. |
+| `k8s_istio_istiod_autoscale_enabled` | `false` | istiod HPA. metrics-server is present so it would work; a lab control plane has nothing to scale for. |
+| `k8s_istio_proxy_resources` | 50m/64Mi, limit 1 CPU/512Mi | Per-sidecar defaults. The chart's 100m/128Mi requests add up fast on a 2-node budget. |
+| `k8s_istio_access_log_file` | `/dev/stdout` | Envoy access log destination. Empty string disables. |
+| `k8s_istio_tracing_enabled` | `true` | Declare the OTel provider in `meshConfig` and apply the mesh-wide `Telemetry`. |
+| `k8s_istio_tracing_provider_name` | `otel-lab` | Name of the `extensionProviders` entry the `Telemetry` refers to. |
+| `k8s_istio_otel_collector_service` / `_port` | `otel-collector.observability.svc.cluster.local` / `4317` | Where spans go: the observability role's collector gateway, OTLP/gRPC. |
+| `k8s_istio_tracing_sampling_percentage` | `100` | `randomSamplingPercentage` on the `Telemetry`. Right for a lab; single digits in production. |
+| `k8s_istio_gateway_node_port_http` | `30880` | HTTP NodePort. `30080` is fathom's, `30300`/`30090` Grafana's and Prometheus's, `30800`/`30443` Argo CD's. |
+| `k8s_istio_gateway_node_port_https` | `30843` | HTTPS NodePort. No certificate is configured; a `Gateway` with a `tls` server and a Secret is the user's job. |
+| `k8s_istio_gateway_url` | `http://192.168.56.10:30880` | Reported at the end of the run. |
+| `k8s_istio_gateway_replicas` | `1` | Gateway replicas. |
+| `k8s_istio_gateway_autoscaling_enabled` | `false` | Gateway HPA, on by default in the chart (1–5 replicas). |
+| `k8s_istio_gateway_resources` | 100m/128Mi, limit 512Mi | Gateway requests/limits. The chart's 2-CPU limit is kept. |
+| `k8s_istio_gateway_api_enabled` | `true` | Install the Kubernetes Gateway API CRDs. Istio doesn't ship them. |
+| `k8s_istio_gateway_api_version` | `v1.6.0` | The `gateway-api` release Istio 1.30's docs are written against. |
+| `k8s_istio_gateway_api_manifest_url` | upstream `standard-install.yaml` | Standard channel only — the experimental channel's CRDs change shape between releases. |
+| `k8s_istio_gateway_api_manifest_path` | `/root/istio/gateway-api-v1.6.0.yaml` | Where the bundle is staged on the node. |
+| `k8s_istio_rollout_timeout` | `300` | Seconds allowed for istiod and the gateway to roll out. |
+
+### Known gotchas
+
+- **A bare request to the gateway is a `404`, and that's correct.** Envoy
+  answers on `30880` from the moment the gateway is up; until a `Gateway`
+  resource selects it and a `VirtualService`/`HTTPRoute` routes something,
+  every path is a 404 with `server: istio-envoy`. A connection *refused* is the
+  problem; a 404 isn't.
+- **A Gateway API `Gateway` deploys its own gateway.** It does not bind to
+  `istio-ingressgateway`; Istio creates a fresh Deployment and Service named
+  `<gateway>-istio` in the Gateway's namespace, and the Service is
+  `LoadBalancer` unless the Gateway carries
+  `networking.istio.io/service-type: NodePort` — in which case the port is
+  allocated, not fixed. `examples/istio/gateway-api.yaml` shows this. The
+  fixed `30880` is reached only through classic `Gateway` resources selecting
+  `istio: ingressgateway`.
+- **Pods that existed before the namespace label have no sidecar.** Injection
+  happens at pod creation. `kubectl -n default rollout restart deployment` (or
+  delete the pods) after labelling.
+- **Existing traffic into a newly-meshed namespace keeps working** because
+  mTLS is `PERMISSIVE`. Switching to `STRICT` mesh-wide will break Prometheus
+  scraping sidecar pods from the unmeshed `observability` namespace unless the
+  metrics port is excluded — the merged `:15020` endpoint is served in
+  plaintext regardless, but any app port scraped directly is not.
+- **The observability, Argo CD and kube-system namespaces are not meshed** on
+  purpose, and shouldn't be. Injecting Prometheus, Loki or MinIO gains nothing
+  and adds a proxy in front of every scrape and S3 call.
+- **Spans need the collector to exist.** The `otel-lab` provider is a hostname;
+  with `k8s_observability_enabled: false` the sidecars log export failures at
+  debug level and drop spans. Set `k8s_istio_tracing_enabled: false` too if
+  the telemetry stack is off, to keep the noise down.
+- **`helm upgrade --install` can't report idempotence by itself** — same gate
+  as `k8s_observability`: "release absent or values changed". Three releases,
+  three gates.

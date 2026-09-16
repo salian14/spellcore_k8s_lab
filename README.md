@@ -3,13 +3,13 @@
 A three-node Kubernetes lab on local VMs. `terraform apply` builds the machines
 and then provisions them the rest of the way: a `kubeadm` cluster with Calico
 networking, metrics-server, trust for the lab image registry, a `kubectl`
-context installed on **your workstation**, and a Grafana/Tempo/Loki/Prometheus
-observability backend. One command, from nothing to a cluster you can drive
-from your own shell.
+context installed on **your workstation**, a Grafana/Tempo/Loki/Prometheus
+observability backend, and an Istio service mesh with an ingress gateway. One
+command, from nothing to a cluster you can drive from your own shell.
 
 Terraform (the [`dmacvicar/libvirt`](https://registry.terraform.io/providers/dmacvicar/libvirt)
 provider) owns the VMs, network, disks and cloud-init; everything past first
-boot is Ansible — twelve roles across four playbooks, all idempotent, all
+boot is Ansible — thirteen roles across five playbooks, all idempotent, all
 listed under [Ansible roles](#ansible-roles).
 
 ## The VMs
@@ -137,7 +137,7 @@ ansible-playbook -i terraform/inventory.ini ansible/k8s-observability.yml
 ```
 
 A cold `terraform apply` is not quick: it downloads the cloud image on the
-first run, installs a cluster, and deploys six Helm releases. Re-running the
+first run, installs a cluster, and deploys nine Helm releases. Re-running the
 playbooks against a healthy lab is a no-op — every role is idempotent, and the
 observability playbook reports `changed=0` on a second pass.
 
@@ -164,7 +164,7 @@ there (it's delimited by `## vagrant-hostmanager-section` markers).
 
 ## What `terraform apply` provisions
 
-Terraform writes an inventory to `terraform/inventory.ini` and runs four
+Terraform writes an inventory to `terraform/inventory.ini` and runs five
 playbooks, in this order (see [`terraform/provision.tf`](terraform/provision.tf)):
 
 1. **`ansible/k8s-node-prereqs.yml`** — every node. Node names into
@@ -182,14 +182,19 @@ playbooks, in this order (see [`terraform/provision.tf`](terraform/provision.tf)
    after, so its readiness check covers every node; the kubeconfig role runs
    last, so the context it hands you points at a complete cluster.
 4. **`ansible/k8s-observability.yml`** — installs Helm, a default StorageClass
-   and the telemetry stack. Runs last because it needs a working cluster.
+   and the telemetry stack. Needs a working cluster.
+5. **`ansible/k8s-istio.yml`** — installs the Istio service mesh (sidecar
+   mode) and an ingress gateway on a NodePort, plus the Kubernetes Gateway API
+   CRDs, and points mesh tracing at the telemetry stack's collector. Runs last
+   for that reason; it installs fine without the stack, the spans just have
+   nowhere to go.
 
 `ansible/playbook.yml` is the odd one out: it targets **your workstation**, not
 the guests, and Terraform never runs it. See [Requirements](#requirements).
 
 ## Ansible roles
 
-Twelve roles. Full variable tables and design notes for each are in
+Thirteen roles. Full variable tables and design notes for each are in
 [`ansible/README.md`](ansible/README.md).
 
 | Role | Playbook | Hosts | What it does |
@@ -206,6 +211,7 @@ Twelve roles. Full variable tables and design notes for each are in
 | `helm_cli` | `k8s-observability.yml` | control | Installs a pinned, checksum-verified Helm 3.21.4 at `/usr/local/bin/helm` |
 | `k8s_local_path_storage` | `k8s-observability.yml` | control | local-path-provisioner v0.0.37, patched to be the cluster's default StorageClass — before this the cluster has none at all |
 | `k8s_observability` | `k8s-observability.yml` | control | Six Helm releases (MinIO, Prometheus, Tempo, Loki, OTel collector, Grafana) in dependency order, plus seven dashboards as labelled ConfigMaps |
+| `k8s_istio` | `k8s-istio.yml` | control | Istio 1.30.4 in sidecar mode — `istio-base`, `istiod` and an `istio-ingressgateway` release on NodePort 30880 — Gateway API v1.6.0 CRDs, a mesh-wide `Telemetry` sending spans to the collector, and `istio-injection=enabled` on `default` |
 
 ## Using kubectl from your workstation
 
@@ -321,6 +327,58 @@ the how-to: the `OTEL_*` block to set, what arrives for free, how to query each
 signal, and how to ship your own dashboards and alert rules. Runnable manifests
 are in [`examples/observability/`](examples/observability/).
 
+## Service mesh
+
+`terraform apply` also installs [Istio](https://istio.io/) 1.30.4 in **sidecar
+mode**: the control plane (`istiod`) in `istio-system`, and one ingress gateway
+in `istio-ingress`, exposed as a NodePort so the host can reach it without an
+ingress controller or MetalLB:
+
+| What | Where |
+| --- | --- |
+| Ingress gateway, HTTP | **<http://192.168.56.10:30880>** |
+| Ingress gateway, HTTPS | `192.168.56.10:30843` (no certificate configured; bring your own via a `Gateway` with `tls`) |
+
+It's a NodePort, so `192.168.56.11` and `.12` work too. Until something binds a
+`Gateway` to it, every request gets a `404` from Envoy — that's the gateway
+working, with nothing routed.
+
+The `default` namespace is labelled `istio-injection=enabled`, so pods created
+there get a sidecar (`READY 2/2`). Pods that already existed need a restart to
+pick one up. Add more namespaces through `k8s_istio_injection_namespaces`; the
+platform namespaces (`observability`, `kube-system`, `istio-*`) are
+deliberately left out.
+
+To route something through the gateway, apply an Istio `Gateway` whose
+`selector` is `istio: ingressgateway` and a `VirtualService` bound to it — or
+the Kubernetes Gateway API equivalent, whose CRDs are installed too.
+[`examples/istio/`](examples/istio/) has both, with an `httpbin` to point them
+at:
+
+```bash
+kubectl -n default apply -f examples/istio/httpbin.yaml -f examples/istio/gateway.yaml
+curl -s http://192.168.56.10:30880/httpbin/get
+```
+
+**The mesh is wired into the observability stack.** Every sidecar and the
+gateway merge Envoy's stats into a `prometheus.io/scrape`-annotated endpoint
+that the lab's Prometheus already scrapes, so `istio_requests_total` and
+friends are queryable at <http://192.168.56.10:30090> with no configuration.
+A mesh-wide `Telemetry` resource sends 100% of request spans to the
+OpenTelemetry collector, which forwards them to Tempo — so Explore → Tempo in
+Grafana shows gateway and sidecar spans for every request, and an application
+that propagates `traceparent` (see
+[`docs/observability-for-developers.md`](docs/observability-for-developers.md))
+fills in the spans between them. Envoy access logs go to each proxy's stdout:
+`kubectl logs <pod> -c istio-proxy`.
+
+What's deliberately *not* here: ambient mode (ztunnel/waypoints — sidecar is
+what the documentation and every feature assume), `istio-cni` (sidecar init
+containers do the iptables work themselves, which kubeadm permits), mTLS
+`STRICT` (the default is `PERMISSIVE`, so unmeshed namespaces keep talking to
+meshed ones), and Kiali. Design notes and the full variable table are in
+[`ansible/README.md`](ansible/README.md#istio-role).
+
 ## Customizing
 
 - **Node count, names, IPs, CPU, memory** — the `nodes` map in
@@ -332,6 +390,9 @@ are in [`examples/observability/`](examples/observability/).
 - **Guest user, image source, disk size** — `guest_user`,
   `ubuntu_image_source` and `disk_size` in the same file, or a
   `terraform.tfvars` next to it.
+- **Istio NodePorts, injection namespaces, sizing, tracing** — same file,
+  `ansible/host_vars/k8s-control.yml`; the `k8s_istio_*` variables are listed
+  in [`ansible/README.md`](ansible/README.md#istio-role).
 - **Observability credentials, NodePorts, retention, volume sizes** — copy
   `ansible/host_vars/k8s-control.yml.example` to
   `ansible/host_vars/k8s-control.yml` (untracked) and override there rather than
@@ -359,6 +420,9 @@ kubectl get nodes -o wide                      # three Ready nodes, InternalIP 1
 kubectl top nodes                              # metrics-server is serving
 kubectl get sc                                 # local-path (default)
 kubectl -n observability get pods              # the six releases' pods
+kubectl -n istio-system get pods               # istiod
+kubectl -n istio-ingress get pods,svc          # the ingress gateway, NodePort 30880
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.56.10:30880/   # 404 from Envoy = gateway up, nothing routed
 ssh -i terraform/artifacts/lab_ed25519 spellcore@192.168.56.10 \
   'sudo helm -n observability list --kubeconfig /etc/kubernetes/admin.conf'
 ```

@@ -1,0 +1,42 @@
+---
+# Exposes httpbin through the ingress gateway the k8s_istio role installed,
+# using Istio's own Gateway/VirtualService APIs. The Gateway binds to the
+# gateway Deployment by label: `istio: ingressgateway` is what the chart
+# derives from the release name `istio-ingressgateway`.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: httpbin-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        # No DNS in the lab, so match everything and route by path below. A
+        # real deployment names its host here and in the VirtualService.
+        - "*"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: httpbin
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - httpbin-gateway
+  http:
+    - match:
+        - uri:
+            prefix: /httpbin/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: httpbin
+            port:
+              number: 8000
