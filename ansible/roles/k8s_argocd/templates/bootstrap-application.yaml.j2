@@ -1,0 +1,40 @@
+# Managed by Ansible (role: k8s_argocd) -- edits here will be overwritten.
+#
+# The app-of-apps: one Application whose manifests are themselves Applications
+# (and ApplicationSets, and AppProjects). Argo CD syncs this one, which creates
+# the rest, and from here on the repository is the source of truth. This is the
+# only Application this role ever applies.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ k8s_argocd_bootstrap_app_name }}
+  namespace: {{ k8s_argocd_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+  # Without this, deleting the bootstrap Application orphans its children
+  # instead of removing them. Cascading delete is the behaviour anyone deleting
+  # "bootstrap" expects.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ k8s_argocd_bootstrap_project }}
+  source:
+    repoURL: {{ k8s_argocd_bootstrap_repo_url }}
+    targetRevision: {{ k8s_argocd_bootstrap_repo_revision }}
+    path: {{ k8s_argocd_bootstrap_repo_path }}
+  destination:
+    # The in-cluster server, addressed the way Argo CD registers it by default.
+    server: https://kubernetes.default.svc
+    namespace: {{ k8s_argocd_bootstrap_dest_namespace }}
+{% if k8s_argocd_bootstrap_sync_automated %}
+  syncPolicy:
+    automated:
+      # prune removes children whose manifests left the repo; selfHeal reverts
+      # kubectl edits made behind Argo CD's back. Together they make the repo
+      # the only way to change the cluster, which is the point of GitOps.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Child applications may target namespaces that don't exist yet.
+      - CreateNamespace=true
+{% endif %}

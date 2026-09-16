@@ -1,0 +1,84 @@
+# Managed by Ansible (role: k8s_argocd) -- edits here will be overwritten.
+#
+# Values for the argo/argo-cd chart. Everything not set here keeps the chart
+# default; the full reference is `helm show values argo/argo-cd --version
+# {{ k8s_argocd_chart_version }}`.
+
+global:
+  # Used by the chart wherever it needs an external name for Argo CD: SSO
+  # redirect URLs, ingress hosts, notification links. None of those are in play
+  # here, but the default is argocd.example.com and it leaks into argocd-cm.
+  domain: "192.168.56.10:{{ k8s_argocd_server_node_port }}"
+
+configs:
+  cm:
+    # The address Argo CD believes it lives at. Off the NodePort scheme below,
+    # so links the UI generates point somewhere real.
+    url: "{{ k8s_argocd_server_url }}"
+    # Polling interval for repositories, since no webhook can reach this lab.
+    timeout.reconciliation: "{{ k8s_argocd_reconciliation_timeout }}"
+    # Every commit to the bootstrap repo is a deployment; keep the diff view
+    # honest about Kubernetes-managed fields rather than flagging drift on them.
+    resource.compareoptions: |
+      ignoreAggregatedRoles: true
+
+  params:
+    # Plain HTTP on the one server port -- UI, REST and gRPC alike. See the
+    # k8s_argocd_server_insecure comment in defaults/main.yml.
+    server.insecure: {{ k8s_argocd_server_insecure | lower }}
+
+  secret:
+    createSecret: true
+    # bcrypt with a FIXED salt so the hash -- and therefore this file -- is the
+    # same on every render. A random salt would mark the values file changed on
+    # each run and push a pointless Helm revision. Hashed on the workstation by
+    # the template engine; the plaintext never reaches the node or the cluster.
+    argocdServerAdminPassword: "{{ k8s_argocd_admin_password | password_hash('bcrypt', k8s_argocd_admin_password_salt, rounds=k8s_argocd_admin_password_rounds) }}"
+    # Pinned for the same reason: the chart defaults this to `now`.
+    argocdServerAdminPasswordMtime: "{{ k8s_argocd_admin_password_mtime }}"
+
+# Chart 10.x keeps the CRDs on `helm upgrade` (crds.keep: true), which is what
+# we want -- deleting the Application CRD deletes every Application with it.
+crds:
+  install: true
+  keep: true
+
+controller:
+  replicas: 1
+  resources: {{ k8s_argocd_controller_resources | to_json }}
+
+repoServer:
+  replicas: 1
+  resources: {{ k8s_argocd_repo_server_resources | to_json }}
+
+server:
+  replicas: 1
+  resources: {{ k8s_argocd_server_resources | to_json }}
+  # NodePort because this cluster has no ingress controller and no MetalLB, so a
+  # LoadBalancer Service would sit <pending> forever. Answers on all three node
+  # IPs over the lab network. The chart publishes an HTTPS Service port too and
+  # wants a NodePort for it; under server.insecure it targets the same
+  # plain-HTTP container port as the HTTP one, so it is a duplicate, not TLS.
+  service:
+    type: NodePort
+    nodePortHttp: {{ k8s_argocd_server_node_port }}
+    nodePortHttps: {{ k8s_argocd_server_node_port_https }}
+
+redis:
+  enabled: true
+  resources: {{ k8s_argocd_small_component_resources | to_json }}
+
+applicationSet:
+  enabled: {{ k8s_argocd_applicationset_enabled | lower }}
+  replicas: 1
+  resources: {{ k8s_argocd_small_component_resources | to_json }}
+
+# Off: nothing to federate. Argo CD falls back to the local admin account.
+dex:
+  enabled: {{ k8s_argocd_dex_enabled | lower }}
+  resources: {{ k8s_argocd_small_component_resources | to_json }}
+
+# Off: no Slack, no email, no webhook targets on an isolated network.
+notifications:
+  enabled: {{ k8s_argocd_notifications_enabled | lower }}
+  resources: {{ k8s_argocd_small_component_resources | to_json }}

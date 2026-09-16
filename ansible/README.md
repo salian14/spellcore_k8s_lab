@@ -26,6 +26,11 @@ which install Helm and a default StorageClass and deploy the
 Grafana/Tempo/Loki/Prometheus/MinIO/OTel telemetry backend — see
 [Observability roles](#observability-roles). Terraform invokes these too.
 
+And `k8s_argocd`, which deploys Argo CD from the upstream `argo/argo-cd` chart,
+exposes it on a NodePort with a fixed admin password, and optionally applies an
+app-of-apps bootstrap Application — see [Argo CD role](#argo-cd-role). Also
+invoked by Terraform, last.
+
 ## Layout
 
 ```
@@ -37,11 +42,12 @@ Grafana/Tempo/Loki/Prometheus/MinIO/OTel telemetry backend — see
     ├── k8s-cluster-bootstrap.yml  # entry point for the five cluster-bootstrap roles below, invoked by terraform apply
     ├── k8s-registry-trust.yml   # entry point for containerd_registry_trust, invoked by terraform apply
     ├── k8s-observability.yml    # entry point for the three observability roles below, invoked by terraform apply
+    ├── k8s-argocd.yml           # entry point for helm_cli + k8s_argocd, invoked by terraform apply
     ├── group_vars/
     │   └── all.yml              # lab network/registry addresses shared by every play
     ├── host_vars/
     │   ├── localhost.yml.example    # copy to localhost.yml to override the lab_workstation role's defaults
-    │   └── k8s-control.yml.example  # copy to k8s-control.yml to override observability credentials/ports/retention
+    │   └── k8s-control.yml.example  # copy to k8s-control.yml to override observability/Argo CD credentials, ports, bootstrap repo
     └── roles/
         ├── lab_workstation/
         │   ├── defaults/main.yml   # all configurable variables
@@ -93,15 +99,22 @@ Grafana/Tempo/Loki/Prometheus/MinIO/OTel telemetry backend — see
         │   ├── defaults/main.yml   # all configurable variables
         │   ├── meta/main.yml
         │   └── tasks/main.yml
-        └── k8s_observability/
+        ├── k8s_observability/
+        │   ├── defaults/main.yml   # all configurable variables
+        │   ├── meta/main.yml
+        │   ├── files/
+        │   │   └── dashboards/     # the seven bundled dashboard JSON files
+        │   ├── tasks/
+        │   │   ├── main.yml
+        │   │   └── dashboards.yml  # renders each dashboard as a labelled ConfigMap
+        │   └── templates/          # one values file per Helm release, plus the ConfigMap template
+        └── k8s_argocd/
             ├── defaults/main.yml   # all configurable variables
             ├── meta/main.yml
-            ├── files/
-            │   └── dashboards/     # the seven bundled dashboard JSON files
-            ├── tasks/
-            │   ├── main.yml
-            │   └── dashboards.yml  # renders each dashboard as a labelled ConfigMap
-            └── templates/          # one values file per Helm release, plus the ConfigMap template
+            ├── tasks/main.yml
+            └── templates/
+                ├── argocd-values.yaml.j2          # values for the argo/argo-cd release
+                └── bootstrap-application.yaml.j2  # the app-of-apps Application, applied only when a repo is set
 ```
 
 `group_vars/all.yml` sits next to the playbooks, so every play here picks it
@@ -1078,3 +1091,191 @@ All variables live in `ansible/roles/k8s_observability/defaults/main.yml`.
   render. It installs and works; it just isn't receiving updates, so the
   eventual migration is to the Grafana operator's `Grafana` CRD. Not a
   today problem, but don't spend time looking for a newer chart version.
+
+## Argo CD role
+
+Deploys [Argo CD](https://argo-cd.readthedocs.io/) — the GitOps controller
+that continuously reconciles the cluster against manifests in a git
+repository — into its own `argocd` namespace, from the upstream
+[`argo/argo-cd`](https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd)
+chart. Same Helm pattern as `k8s_observability`: a pinned chart version, a
+values file rendered to `/root/argocd/`, a `helm status` guard and an
+`upgrade --install` gated on "release absent or values changed".
+
+### How it's invoked
+
+`terraform apply` runs `k8s-argocd.yml` last, after `k8s-observability.yml`
+(see `../terraform/provision.tf`). The playbook lists `helm_cli` again before
+`k8s_argocd` even though the observability playbook already installs it: the
+role is idempotent, and it makes this playbook runnable on its own. Nothing here
+depends on the telemetry stack, and Argo CD needs no StorageClass — its state
+lives in Kubernetes objects and a non-persistent Redis cache.
+
+Re-run by hand against the running VMs from the repo root:
+
+```bash
+ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
+```
+
+A second run against a healthy lab is a no-op (`changed=0`).
+
+### What the role does
+
+1. Waits for the API server, creates the `argocd` namespace, adds the `argo`
+   chart repository if it's missing.
+2. Renders `argocd-values.yaml` to `/root/argocd/` (`0700`/`0600` — it carries
+   the admin password hash).
+3. `helm upgrade --install argocd argo/argo-cd --version 10.9.1 --wait`,
+   gated as above. Five pods — application controller, repo server, API
+   server, Redis, ApplicationSet controller — plus a one-shot Redis
+   secret-init Job.
+4. Waits for `deployment/argocd-server` to roll out even on a no-op run, so a
+   green `helm status` over a broken server still fails the play.
+5. If `k8s_argocd_bootstrap_repo_url` is set, renders and `kubectl apply`s one
+   `Application` — see [Bootstrapping from a repository](#bootstrapping-from-a-repository).
+6. Reports the UI URL, the login, the CLI login command and the workloads.
+
+### Exposure
+
+The API server is a `NodePort` Service on `30800` (HTTP) — the cluster has no
+ingress controller and no MetalLB, so a `LoadBalancer` would sit `<pending>`
+forever. Answers on every node IP over the lab network:
+<http://192.168.56.10:30800>.
+
+It runs with `server.insecure: true`, meaning plain HTTP for the UI, the REST
+API and gRPC on that one port instead of a self-signed certificate. Same
+posture as Grafana and the lab registry. The consequence for the `argocd` CLI
+is `--plaintext` rather than `--insecure`:
+
+```bash
+argocd login 192.168.56.10:30800 --username admin --password lab-argocd --plaintext
+```
+
+The chart also publishes an HTTPS Service port and wants a NodePort for it
+(`30443`); under `server.insecure` it targets the same plain-HTTP container
+port, so it's a duplicate of `30800`, not a TLS listener.
+
+### Credentials
+
+Argo CD has a single built-in `admin` account; its password is `lab-argocd`,
+**plaintext** in `roles/k8s_argocd/defaults/main.yml`, for the same reason the
+observability credentials are — see [Credentials](#credentials) above.
+Override it in `host_vars/k8s-control.yml` rather than editing the defaults.
+
+Argo CD stores the password as a **bcrypt hash** in `argocd-secret`, so the
+values template hashes it at render time with
+`password_hash('bcrypt', <salt>, rounds=10)`. Two things to know about that:
+
+- **The filter runs on the workstation**, not the node — templates render
+  wherever `ansible-playbook` runs — and it needs `passlib` and `bcrypt`
+  importable by the Python Ansible uses. On Ubuntu that's `sudo apt install
+  python3-passlib python3-bcrypt` (`ansible-core` only *recommends* passlib
+  and doesn't pull in bcrypt at all); elsewhere `pip install passlib bcrypt`.
+  Without them the render fails on the values template. This is the only role
+  in the repo with a workstation-side Python dependency beyond Ansible itself.
+- **The salt is fixed** (`k8s_argocd_admin_password_salt`). bcrypt normally
+  salts randomly, which would change the hash — and therefore the rendered
+  values file — on every run, and trip the "values changed → `helm upgrade`"
+  gate every time. A fixed salt on a password that's already committed in
+  plaintext costs nothing. `admin.passwordMtime` is pinned for the same reason;
+  the chart otherwise stamps it with `now` on every render.
+
+Left empty, the chart would instead have Argo CD generate a random initial
+password into `argocd-initial-admin-secret`. That works, but it's a second
+credential to go and fetch on every rebuild, which is what the fixed one avoids.
+
+### Bootstrapping from a repository
+
+The role installs Argo CD with **no applications**. The GitOps hand-off is an
+[app-of-apps](https://argo-cd.readthedocs.io/en/stable/operator-manual/cluster-bootstrapping/):
+set `k8s_argocd_bootstrap_repo_url` (in `host_vars/k8s-control.yml`) and the
+role applies one `Application` named `bootstrap`, pointed at that repository's
+`bootstrap/` directory, in the `argocd` namespace, with automated sync, prune
+and self-heal. Every further `Application`, `ApplicationSet` and `AppProject`
+is expected to come from that directory, not from this role.
+
+```yaml
+# ansible/host_vars/k8s-control.yml
+k8s_argocd_bootstrap_repo_url: https://github.com/you/lab-gitops.git
+```
+
+The manifest is applied with `kubectl` rather than through the chart's
+`extraObjects`, so adding or changing the bootstrap repository doesn't bump the
+Helm release. It carries the `resources-finalizer.argocd.argoproj.io`
+finalizer, so deleting `bootstrap` cascades to everything it created rather
+than orphaning it.
+
+The repository has to be reachable **from the cluster**. The lab network is
+NAT'd, so public HTTPS repositories (GitHub, GitLab, …) work out of the box; a
+private one needs a repository credential Secret in the `argocd` namespace
+first — [declaratively](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/#repositories)
+or via `argocd repo add` — and this role doesn't manage those.
+
+### `k8s_argocd` role variables
+
+All variables live in `ansible/roles/k8s_argocd/defaults/main.yml`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `k8s_argocd_enabled` | `true` | Set `false` to skip the role (checked as a `when:` on the role in `k8s-argocd.yml`). |
+| `k8s_argocd_kubeconfig` | `/etc/kubernetes/admin.conf` | Kubeconfig passed to both `kubectl` and `helm`. |
+| `k8s_argocd_helm_binary` | `/usr/local/bin/helm` | Binary installed by `helm_cli`. |
+| `k8s_argocd_helm_timeout` | `10m` | `--timeout` on `helm upgrade --install --wait`. |
+| `k8s_argocd_namespace` | `argocd` | Argo CD's namespace. The docs, the CLI and every example assume this name. |
+| `k8s_argocd_release_name` | `argocd` | Helm release name; also the prefix of every object the chart creates (`argocd-server`, …). |
+| `k8s_argocd_values_dir` | `/root/argocd` | Where the values file and bootstrap manifest are rendered. `0700`, because the values file carries the password hash. |
+| `k8s_argocd_helm_repo_name` / `_url` | `argo` / `https://argoproj.github.io/argo-helm` | Chart repository, added if absent. |
+| `k8s_argocd_chart` / `_chart_version` | `argo/argo-cd` / `10.9.1` | Pinned chart; appVersion v3.5.3. |
+| `k8s_argocd_admin_password` | `lab-argocd` | The `admin` login. Plaintext lab credential — see Credentials above. |
+| `k8s_argocd_admin_password_salt` | 22-char fixed string | bcrypt salt, fixed so the hash is stable across runs. Must be exactly 22 characters from `[./A-Za-z0-9]`; the role asserts this. |
+| `k8s_argocd_admin_password_rounds` | `10` | bcrypt cost. |
+| `k8s_argocd_admin_password_mtime` | `2026-09-15T00:00:00Z` | `admin.passwordMtime` in `argocd-secret`, pinned so the Secret is byte-identical across upgrades. Bump it when you change the password to invalidate old sessions. |
+| `k8s_argocd_server_insecure` | `true` | Plain HTTP on the server port. Set `false` for the chart's self-signed TLS; the CLI then needs `--insecure` instead of `--plaintext`. |
+| `k8s_argocd_server_node_port` | `30800` | HTTP NodePort. `30080` is fathom's, `30300`/`30090` Grafana's and Prometheus's. |
+| `k8s_argocd_server_node_port_https` | `30443` | The chart's mandatory HTTPS NodePort. Under `server.insecure` it's a duplicate of the HTTP one. |
+| `k8s_argocd_server_url` | `http://192.168.56.10:30800` | Written into `argocd-cm` as `url` (so UI-generated links are real) and reported at the end of the run. |
+| `k8s_argocd_dex_enabled` | `false` | Dex SSO. Nothing to federate in the lab. |
+| `k8s_argocd_notifications_enabled` | `false` | Notifications controller. Nowhere to send anything from an isolated network. |
+| `k8s_argocd_applicationset_enabled` | `true` | ApplicationSet controller. One small pod; needed by any bootstrap repo that uses `ApplicationSet`. |
+| `k8s_argocd_reconciliation_timeout` | `60s` | `timeout.reconciliation` in `argocd-cm`: how often every repo is re-polled. Upstream is `180s`; polling is the only way a push lands here, since no webhook can reach the lab. |
+| `k8s_argocd_controller_resources` | 250m/512Mi, limit 1Gi | Application controller requests/limits. The chart ships none. |
+| `k8s_argocd_repo_server_resources` | 100m/256Mi, limit 1Gi | Repo server. Grows with the size of the repositories it renders. |
+| `k8s_argocd_server_resources` | 100m/128Mi, limit 512Mi | API server. |
+| `k8s_argocd_small_component_resources` | 50m/64Mi, limit 256Mi | Redis, ApplicationSet, Dex and notifications. |
+| `k8s_argocd_bootstrap_repo_url` | `""` | **Empty means no bootstrap Application.** Set to a git URL reachable from the cluster to apply the app-of-apps. |
+| `k8s_argocd_bootstrap_repo_path` | `bootstrap` | Directory in that repository holding the child manifests. |
+| `k8s_argocd_bootstrap_repo_revision` | `HEAD` | Branch, tag or commit to track. |
+| `k8s_argocd_bootstrap_app_name` | `bootstrap` | Name of the app-of-apps `Application`. |
+| `k8s_argocd_bootstrap_project` | `default` | `AppProject` it belongs to. The chart creates `default` with no restrictions. |
+| `k8s_argocd_bootstrap_dest_namespace` | `argocd` | Where the bootstrap app's *own* manifests land. An app-of-apps produces `Application`s, which must live in the Argo CD namespace; children pick their own destinations. |
+| `k8s_argocd_bootstrap_sync_automated` | `true` | Automated sync with `prune` and `selfHeal`, plus `CreateNamespace=true`. Set `false` to review the first sync by hand in the UI. |
+| `k8s_argocd_bootstrap_manifest_path` | `/root/argocd/bootstrap-application.yaml` | Where the rendered `Application` is staged before `kubectl apply`. |
+| `k8s_argocd_rollout_timeout` | `300` | Seconds allowed for `argocd-server` to roll out. |
+| `k8s_argocd_cli_login_command` | derived | The `argocd login …` line printed at the end of the run. |
+
+### Known gotchas
+
+- **`helm upgrade --install` can't report idempotence by itself**, same as
+  in `k8s_observability` — the release is gated on "absent or values changed".
+  That gate is also why the bcrypt salt and `passwordMtime` are pinned: either
+  one floating would make the values file differ on every render and defeat
+  the gate.
+- **CRDs are kept on uninstall** (`crds.keep: true`, the chart default).
+  `helm uninstall argocd` leaves `applications.argoproj.io` and friends in
+  place, which is what you want — deleting the `Application` CRD deletes every
+  `Application` with it, and with the finalizer on `bootstrap` that would
+  cascade into deleting every workload it manages.
+- **Deleting `bootstrap` deletes everything it created.** That's the
+  `resources-finalizer.argocd.argoproj.io` finalizer doing its job. To detach
+  Argo CD from the workloads instead, remove the finalizer first, then delete.
+- **A push doesn't deploy instantly.** With no webhook path into the lab, Argo
+  CD notices a commit on its next poll — up to `k8s_argocd_reconciliation_timeout`
+  (60s) later. `argocd app get bootstrap --refresh` or the UI's *Refresh*
+  button forces it.
+- **The repo server clones over the lab NAT.** `git` access to anything on
+  the workstation itself has to go via `192.168.56.1`, the host's lab address —
+  `localhost` from inside a pod is the pod. The same rule as `registry.lab`.
+- **`resource.compareoptions: ignoreAggregatedRoles: true`** is set so that
+  ClusterRoles with aggregation rules — whose `rules:` the API server fills in
+  — don't show as permanently out of sync. Without it any app that ships one
+  is `OutOfSync` forever and self-heal loops on it.

@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  author: spellcore_k8s_lab
+  role_name: k8s_argocd
+  description: >-
+    Deploy Argo CD from the upstream argo-helm chart, expose its API server on
+    a NodePort, set a fixed admin password and optionally apply an app-of-apps
+    bootstrap Application
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []
