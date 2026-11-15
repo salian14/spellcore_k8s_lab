@@ -464,9 +464,11 @@ The cluster has one cluster-admin credential and no quotas, so what an
 application developer — human or agent — may and may not do is written down
 rather than enforced.
 [`docs/application-developer-contract.md`](docs/application-developer-contract.md)
-is that agreement: one namespace per application, the reserved namespaces and
-NodePorts, how to expose something through the shared ingress gateway, the
-resource and telemetry obligations, and when to stop and ask. It is
+is that agreement: one namespace per application, deployed by the tenant's
+own Argo CD `Application` from their own repository with images from a public
+registry; the reserved namespaces and NodePorts; how to expose something
+through the shared ingress gateway; the resource and telemetry obligations;
+and when to stop and ask. It is
 self-contained, so it can be handed to an agent working in another repository.
 
 ## Customizing

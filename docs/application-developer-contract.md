@@ -53,18 +53,18 @@ MUST NOT put real secrets, production credentials or personal data in it.
 | Service | Address | Notes |
 | --- | --- | --- |
 | Ingress gateway (HTTP) | `http://192.168.56.10:30880` | Shared Istio gateway; `404` means up with nothing routed. §6 |
-| Image registry | `registry.lab:5000` (= `192.168.56.1:5000`) | Plain HTTP, no auth. §5.3 |
 | OTLP ingest | `otel-collector.observability.svc.cluster.local:4317` (gRPC), `:4318` (HTTP) | In-cluster, no TLS, no auth. §8 |
 | Grafana | `http://192.168.56.10:30300` | `admin` / `lab-observability` |
 | Prometheus | `http://192.168.56.10:30090` | `/targets` and raw PromQL |
-| Argo CD | `http://192.168.56.10:30800` | `admin` / `lab-argocd`. Read-only for tenants (§4.4) |
+| Argo CD | `http://192.168.56.10:30800` | `admin` / `lab-argocd`. How you deploy. §5.1 |
 | S3 object store | `object-store.platform.svc.cluster.local:8333` | By request only. §7.4 |
 
 Every NodePort also answers on `192.168.56.11` and `.12`.
 
 **3.1 Not provided.** Do not design for any of these: DNS names or TLS
 certificates for your app; a `LoadBalancer` implementation (such Services
-stay `<pending>` forever); an Ingress controller; cert-manager; a secrets
+stay `<pending>` forever); an Ingress controller; an image registry for
+tenants (§5.3); cert-manager; a secrets
 manager; the Prometheus Operator CRDs (`ServiceMonitor`, `PodMonitor`,
 `PrometheusRule` do not exist); Alertmanager; collection of pod
 `stdout`/`stderr` into Loki; backups; `ReadWriteMany` volumes.
@@ -72,8 +72,9 @@ manager; the Prometheus Operator CRDs (`ServiceMonitor`, `PodMonitor`,
 ## 4. Your namespace, and everything that is not yours
 
 **4.1** You get **one namespace per application**, named after the
-application (lowercase DNS label, e.g. `fathom`). You create it; you own
-everything in it; you delete it when you are done (§11). Before creating it,
+application (lowercase DNS label, e.g. `fathom`). Your Argo CD Application
+creates it (§5.1); you own everything in it; you delete it when you are done
+(§11). Before creating it,
 check `kubectl get ns` — if the name exists and is not yours, pick another.
 
 **4.2** Every namespaced resource you create MUST live in your namespace.
@@ -87,36 +88,108 @@ local-path-storage  tigera-operator  calico-system  calico-apiserver
 ```
 
 `default` is for the lab's own examples and smoke tests, not for
-applications. Another tenant's namespace is reserved to that tenant.
+applications. Another tenant's namespace is reserved to that tenant. The one
+exception in `argocd` is your own `Application` (§4.4).
 
 **4.3** You MUST NOT create, modify or delete **cluster-scoped** resources
 without the lab owner's explicit approval: `CustomResourceDefinition`,
 `ClusterRole`/`ClusterRoleBinding`, admission webhooks, `StorageClass`,
 `PriorityClass`, `GatewayClass`, `Node` objects (labels, taints, cordon,
-drain), `PersistentVolume`. The single exception is your own `Namespace`.
+drain), `PersistentVolume`. The single exception is your own `Namespace`, created for you by Argo CD's
+`CreateNamespace=true`.
 If your application needs an operator or a CRD, that is a request (§12),
 not something to install.
 
-**4.4** You MUST NOT create or modify Argo CD `Application`,
-`ApplicationSet` or `AppProject` objects, and MUST NOT `kubectl edit`
-anything Argo CD manages — it is reverted within about a minute anyway.
-Argo CD currently deploys the platform only; tenants deploy with
-`kubectl`/`helm` from their own repository (§5.1).
+**4.4 Argo CD is a platform service, and you are expected to use it** — it
+is how tenants deploy (§5.1). In the `argocd` namespace you own the
+`Application` objects you register for your application, and nothing else.
+You MUST NOT create, modify, sync, or delete any other `Application`
+(`bootstrap`, `platform`, `observability` and their children are the lab's;
+the rest are other tenants'), any `AppProject` or `ApplicationSet`, or Argo
+CD's own configuration, repositories, accounts and settings — through
+`kubectl`, the UI or the `argocd` CLI alike. The login is a shared admin, so
+this too is a rule you keep (§1.2).
 
 **4.5** You MUST NOT run `terraform`, `ansible-playbook`, `virsh` or `ssh`
-against the lab's nodes or host, and MUST NOT change the lab repository
+against the lab's nodes or host, MUST NOT use the lab repository as your
+Application's source, and MUST NOT change the lab repository
 except by pull request (§12).
 
 ## 5. Deploying
 
-**5.1** Deploy with `kubectl` or `helm` from your own repository, always
-naming the context and namespace explicitly — never rely on the current
-context, which may point at a different cluster:
+**5.1 Deploy through Argo CD.** Your manifests — plain YAML, kustomize or a
+Helm chart — live in your own git repository. You register one `Application`
+pointing at them, and from then on **a commit is the deployment**: Argo CD
+polls every 60 seconds (no webhook can reach the lab) and makes your
+namespace match the repository.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app                      # your namespace name
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io   # deleting the Application removes what it deployed
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/<owner>/<repo>.git
+    targetRevision: main
+    path: deploy
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: my-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    managedNamespaceMetadata:
+      labels:
+        istio-injection: enabled    # only if you want sidecars (§9.1)
+```
+
+Keep that manifest in your repository and register it once:
 
 ```bash
-kubectl --context spellcore-k8s-lab -n <your-namespace> apply -f ...
-helm --kube-context spellcore-k8s-lab -n <your-namespace> upgrade --install ...
+kubectl --context spellcore-k8s-lab -n argocd apply -f application.yaml
+kubectl --context spellcore-k8s-lab -n argocd get application my-app   # Synced / Healthy
 ```
+
+- **Name.** The `Application` MUST be named after your namespace, or
+  `<namespace>-<component>` if you need more than one. Check
+  `kubectl -n argocd get applications` first; never reuse an existing name —
+  applying over someone else's `Application` redeploys their workload from
+  your repository.
+- **Destination.** MUST be the in-cluster server and your own namespace, and
+  every resource your source renders MUST land in that namespace. The
+  `default` AppProject is the only project and restricts nothing, so Argo CD
+  will happily sync a `ClusterRole` or a manifest hard-coded to another
+  namespace — §4.2 and §4.3 still apply to what your repository contains.
+- **Source.** MUST be your own repository, reachable from the cluster over
+  public HTTPS. A private repository needs a credential stored in `argocd`,
+  which is a real secret in a lab that should hold none (§2.2): request it
+  (§12) with a read-only, single-repository deploy key. Pin Helm chart
+  versions; `targetRevision` SHOULD be a branch you control or a tag, not
+  someone else's moving branch.
+- **Sync policy.** SHOULD be automated with `prune` and `selfHeal`, as above.
+  You MAY refresh or sync **your own** Application from the UI or the CLI
+  (`argocd login 192.168.56.10:30800 --username admin --password lab-argocd --plaintext`).
+- **`kubectl` is for looking, not for deploying.** Read, `logs`, `exec`,
+  `port-forward` and throwaway debug pods (`kubectl run --rm`) in your
+  namespace are fine. Anything meant to persist goes through git — with
+  `selfHeal` a hand edit is reverted within a minute, and without it you have
+  drift nobody can reproduce after a rebuild (§2.1). Whenever you do use
+  `kubectl` or `helm`, name `--context spellcore-k8s-lab` (`--kube-context`
+  for Helm) and the namespace explicitly; never rely on the current context,
+  which may point at a different cluster.
+- **Argo CD renders, it does not install.** Helm charts go through
+  `helm template`: `lookup` sees an empty cluster and Helm hooks become sync
+  hooks. Large objects (dashboard ConfigMaps near the 1 MiB limit) need the
+  `ServerSideApply=true` sync option. Use `argocd.argoproj.io/sync-wave`
+  annotations if your resources need ordering.
 
 **5.2 Preflight.** Before your first deploy in a session, confirm the lab is
 the lab and is healthy. If any of these fails, stop (§12) — do not repair it:
@@ -124,16 +197,32 @@ the lab and is healthy. If any of these fails, stop (§12) — do not repair it:
 ```bash
 kubectl --context spellcore-k8s-lab get nodes        # three nodes, all Ready
 kubectl --context spellcore-k8s-lab get sc           # local-path (default)
+kubectl --context spellcore-k8s-lab -n argocd get applications   # the lab's own: Synced / Healthy
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.56.10:30880/   # 404, or a route
 ```
 
-**5.3 Images.** Tag locally built images `registry.lab:5000/<app>/<image>:<tag>`
-— the name, not `localhost:5000` or the IP; only the name is trusted by the
-nodes. The registry is run on the workstation separately from the lab and may
-not be up: check `curl -s http://registry.lab:5000/v2/_catalog`. Public
-registries are reachable through NAT. You MUST pin a specific tag or digest
-(no `latest`), and MUST NOT overwrite or delete another tenant's repositories
-— the registry has no auth, so that too is on you.
+**5.3 Images come from a public registry, not from the lab.** Publish your
+application's images to a registry outside the lab — GHCR (`ghcr.io`), Quay,
+a cloud provider's registry, Docker Hub — from your own repository's build,
+and reference them from there. The nodes pull through NAT, so any public
+registry works, and an image that lives outside the lab survives a rebuild
+(§2.1) and matches what the commit says was deployed.
+
+- You MUST pin a specific tag or, better, a digest. No `latest`, and no tag
+  you later overwrite: Argo CD sees no change in git and deploys nothing.
+- Images SHOULD be publicly pullable. A private image needs an
+  `imagePullSecret`, which is a real credential in a lab that should hold
+  none (§2.2): request it (§12), scope it read-only to that one repository,
+  and never commit it to git.
+- All nodes share one outbound address, so anonymous Docker Hub pulls hit its
+  rate limit quickly; prefer a registry that does not throttle anonymous
+  pulls for anything you pull often.
+- The lab's own registry (`registry.lab:5000`) is **not a tenant service**.
+  It is plain HTTP with no auth, runs on the workstation separately from the
+  cluster, may not be up, and is not rebuilt with the lab. You SHOULD NOT
+  reference it from application manifests; using it at all (an image that
+  genuinely cannot be published, say) needs approval, and you MUST NOT
+  overwrite or delete anything in it that is not yours.
 
 **5.4 Every container MUST declare CPU and memory `requests` and a memory
 `limit`.** Nothing enforces a quota, so an unbounded pod starves the platform
@@ -257,8 +346,8 @@ run load generators against the collector without approval.
 (`prometheus.io/scrape: "true"`, `prometheus.io/port`). There is no
 `ServiceMonitor`.
 
-**8.5 Dashboards and alerts ship from your namespace** as ConfigMaps
-labelled `grafana_dashboard: "1"` / `grafana_alert: "1"`. One dashboard per
+**8.5 Dashboards and alerts ship from your namespace** — in the same
+repository, through the same Application — as ConfigMaps labelled `grafana_dashboard: "1"` / `grafana_alert: "1"`. One dashboard per
 ConfigMap; every panel and alert query MUST pin its datasource UID
 (`prometheus`, `loki` or `tempo` — an unpinned panel silently lands on
 Tempo); alert rule `uid`s MUST be stable and prefixed with your application
@@ -269,8 +358,8 @@ tenants' dashboards, notification policies), nor edit anything in the
 ## 9. Service mesh
 
 **9.1** To join the mesh, label **your own** namespace
-`istio-injection=enabled` in its manifest; pods created afterwards get a
-sidecar (`READY 2/2`). Each sidecar adds 50m CPU / 64 Mi of requests to the
+`istio-injection=enabled` — through `managedNamespaceMetadata` on your
+Application (§5.1); pods created afterwards get a sidecar (`READY 2/2`). Each sidecar adds 50m CPU / 64 Mi of requests to the
 pod — count it in §5.4.
 
 **9.2** Meshed pods get request metrics (`istio_requests_total`), access logs
@@ -295,7 +384,7 @@ those listed in §3 need the owner's agreement, even though the network allows
 them.
 
 **10.2** Clean up what you no longer use — failed Jobs, test namespaces,
-image tags you pushed to the registry. Leave nothing running that you would
+Applications for experiments that are over. Leave nothing running that you would
 not be able to explain.
 
 **10.3** If you find something broken, misconfigured or insecure in the
@@ -306,13 +395,19 @@ platform or in another tenant's namespace, report it (§12). Do not fix it.
 In this order:
 
 1. Remove alert rules explicitly. Deleting an alert ConfigMap does **not**
-   delete the rule; apply a `grafana_alert` ConfigMap containing
-   `deleteRules: [{orgId: 1, uid: <your-rule-uid>}]`, confirm the rule is gone
-   in Grafana, then continue.
-2. `kubectl --context spellcore-k8s-lab delete namespace <your-namespace>` —
-   takes workloads, routes, dashboards and PVCs with it.
-3. Anything you were granted outside your namespace (a NodePort, buckets and
-   an S3 identity, a CRD): tell the lab owner it can be reclaimed.
+   delete the rule; commit a `grafana_alert` ConfigMap containing
+   `deleteRules: [{orgId: 1, uid: <your-rule-uid>}]`, let it sync, confirm the
+   rule is gone in Grafana, then continue.
+2. Delete **your** Application —
+   `kubectl --context spellcore-k8s-lab -n argocd delete application <your-app>`.
+   With the finalizer from §5.1 that removes everything it deployed. Deleting
+   the namespace first instead just makes Argo CD recreate it.
+3. `kubectl --context spellcore-k8s-lab delete namespace <your-namespace>` —
+   Argo CD does not remove a namespace it created, and this takes any
+   leftover PVCs with it.
+4. Anything you were granted outside your namespace (a NodePort, buckets and
+   an S3 identity, a repository or image-pull
+   credential, a CRD): tell the lab owner it can be reclaimed.
 
 ## 12. Asking for something, reporting something, and when to stop
 
@@ -339,8 +434,10 @@ bump; and requests under §12.1 get an answer.
 Before you call a deployment done:
 
 - [ ] Everything is in my one namespace; nothing reserved or cluster-scoped was touched (§4)
-- [ ] Every command named `--context spellcore-k8s-lab` (§5.1)
-- [ ] Images are pinned, and local ones are tagged `registry.lab:5000/...` (§5.3)
+- [ ] It is deployed by my own Argo CD Application from my repository, which reports `Synced` / `Healthy`; nothing persistent was applied by hand (§5.1)
+- [ ] The only thing I touched in `argocd` is that Application (§4.4)
+- [ ] Every `kubectl` command named `--context spellcore-k8s-lab` (§5.1)
+- [ ] Images are pulled from a public registry (not `registry.lab`), pinned by tag or digest (§5.3)
 - [ ] Every container has CPU/memory requests and a memory limit, sidecar included in the total (§5.4, §9.1)
 - [ ] Exposure is via the shared gateway under `/<my-namespace>/` only (§6)
 - [ ] Volumes are bounded by the application and nothing irreplaceable lives in them (§2.1, §7)
