@@ -2,6 +2,9 @@
 # are in the same order the Vagrantfile's ansible provisioner used; Istio was
 # added after the Terraform migration and goes last because its mesh tracing
 # points at the telemetry stack. Re-run everything with
+# are in the same order the Vagrantfile's ansible provisioner used; Argo CD
+# was added after the Terraform migration and goes last because it only needs
+# the cluster, not the telemetry stack. Re-run everything with
 #   terraform apply -replace=terraform_data.ansible
 # or a single playbook by hand:
 #   ansible-playbook -i terraform/inventory.ini ansible/<playbook>.yml
@@ -23,6 +26,7 @@ resource "terraform_data" "ansible" {
       ansible-playbook -i terraform/inventory.ini ansible/k8s-cluster-bootstrap.yml
       ansible-playbook -i terraform/inventory.ini ansible/k8s-observability.yml
       ansible-playbook -i terraform/inventory.ini ansible/k8s-istio.yml
+      ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
     EOT
   }
 }
