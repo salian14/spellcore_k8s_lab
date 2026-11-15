@@ -40,9 +40,11 @@ allowed.
 
 **2.1 No durability, no SLA.** The lab is rebuilt from nothing with
 `terraform destroy` / `apply` at the lab owner's discretion and without
-notice. That deletes every workload, volume, bucket, metric, trace and log.
-Your deployment MUST be reproducible from your own repository, and nothing
-you cannot afford to lose may exist only in the lab.
+notice. That deletes every workload, volume, bucket, metric, trace and log —
+and your Argo CD `Application` with them. Nothing re-registers tenants after
+a rebuild: bringing your application back is your job (§5.1). Your deployment
+MUST be reproducible from your own repository, and nothing you cannot afford
+to lose may exist only in the lab.
 
 **2.2 It is a lab.** Every platform credential is a published default, most
 endpoints are plain HTTP, and all tenants share one admin credential. You
@@ -151,12 +153,20 @@ spec:
         istio-injection: enabled    # only if you want sidecars (§9.1)
 ```
 
-Keep that manifest in your repository and register it once:
+Keep that manifest in your repository and register it — once per lab build:
 
 ```bash
 kubectl --context spellcore-k8s-lab -n argocd apply -f application.yaml
 kubectl --context spellcore-k8s-lab -n argocd get application my-app   # Synced / Healthy
 ```
+
+**After a lab rebuild your Application is gone** (§2.1), and with it
+everything it deployed. That is expected, not a fault to report: once the
+preflight (§5.2) passes, run the same two commands again and Argo CD
+redeploys the application from your repository. This is the one `kubectl
+apply` you make by hand, and the reason the manifest lives in git. If your
+Application is missing and you did not delete it, assume a rebuild —
+re-register; do not go looking for what removed it.
 
 - **Name.** The `Application` MUST be named after your namespace, or
   `<namespace>-<component>` if you need more than one. Check
@@ -197,7 +207,7 @@ the lab and is healthy. If any of these fails, stop (§12) — do not repair it:
 ```bash
 kubectl --context spellcore-k8s-lab get nodes        # three nodes, all Ready
 kubectl --context spellcore-k8s-lab get sc           # local-path (default)
-kubectl --context spellcore-k8s-lab -n argocd get applications   # the lab's own: Synced / Healthy
+kubectl --context spellcore-k8s-lab -n argocd get applications   # the lab's own: Synced / Healthy. Yours missing? Re-register (§5.1)
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.56.10:30880/   # 404, or a route
 ```
 
