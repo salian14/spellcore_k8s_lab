@@ -1,0 +1,43 @@
+# The lab's one ingress Gateway. The platform owns it; applications do not
+# create Gateways of their own -- they bring a VirtualService in their own
+# namespace that names this one:
+#
+#   gateways: [istio-ingress/lab-gateway]
+#
+# and routes a path prefix to their Service. See
+# docs/application-developer-contract.md (section 6) for the tenant side.
+#
+# Why one shared Gateway rather than one per application: every Gateway on the
+# same port of the same gateway pods ends up in the same Envoy listener anyway,
+# so per-application Gateways buy no isolation -- they only spread the
+# definition of "what does :30880 accept" across every tenant's repository.
+# With it here, adding HTTPS or host-based routing later is one change in one
+# place.
+#
+# It binds to the gateway pods the k8s_istio role installed (the `istio`
+# label is derived from the Helm release name `istio-ingressgateway`) and lives
+# in their namespace, which is where Istio recommends a Gateway sit.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: istio-ingress
+  labels:
+    app.kubernetes.io/name: lab-gateway
+    app.kubernetes.io/part-of: platform
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    # Plain HTTP on the gateway Service's port 80, which is NodePort 30880 on
+    # every node. There is no HTTPS server: nothing in the lab issues
+    # certificates, so 30843 stays unrouted until one is added here.
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        # No DNS in the lab, so every application shares the wildcard host and
+        # is told apart by path prefix. A bare "*" is "*/*": VirtualServices
+        # from any namespace may bind, which is the point.
+        - "*"

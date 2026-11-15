@@ -889,7 +889,10 @@ All variables live in `ansible/roles/k8s_istio/defaults/main.yml`.
   `networking.istio.io/service-type: NodePort` — in which case the port is
   allocated, not fixed. `examples/istio/gateway-api.yaml` shows this. The
   fixed `30880` is reached only through classic `Gateway` resources selecting
-  `istio: ingressgateway`.
+  `istio: ingressgateway` — in this lab exactly one, the platform-owned
+  `istio-ingress/lab-gateway` that Argo CD deploys from
+  `gitops/platform/ingress/`. This role installs the gateway pods; it does not
+  create that `Gateway`.
 - **Pods that existed before the namespace label have no sidecar.** Injection
   happens at pod creation. `kubectl -n default rollout restart deployment` (or
   delete the pods) after labelling.

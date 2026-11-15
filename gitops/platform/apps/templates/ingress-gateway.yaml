@@ -1,0 +1,15 @@
+{{- if .Values.ingressGateway.enabled }}
+# Wave 0: the shared Istio Gateway that every application's VirtualService
+# binds to. It is configuration for gateway pods the k8s_istio role already
+# installed, so it depends on nothing in this stack and has no health of its
+# own to wait on.
+#
+# The manifest names its own namespace (istio-ingress), which overrides the
+# `platform` destination the helper sets -- the Gateway belongs beside the
+# pods it selects, not beside the object store.
+{{ include "platform.directoryApplication" (dict
+  "root" .
+  "name" "ingress-gateway"
+  "wave" 0
+  "path" "gitops/platform/ingress") }}
+{{- end }}

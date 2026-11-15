@@ -52,7 +52,7 @@ MUST NOT put real secrets, production credentials or personal data in it.
 
 | Service | Address | Notes |
 | --- | --- | --- |
-| Ingress gateway (HTTP) | `http://192.168.56.10:30880` | Shared Istio gateway; `404` means up with nothing routed. §6 |
+| Ingress gateway (HTTP) | `http://192.168.56.10:30880` | Platform-owned `Gateway` `istio-ingress/lab-gateway`; you attach a `VirtualService`. `404` means up, nothing routed at that path. §6 |
 | OTLP ingest | `otel-collector.observability.svc.cluster.local:4317` (gRPC), `:4318` (HTTP) | In-cluster, no TLS, no auth. §8 |
 | Grafana | `http://192.168.56.10:30300` | `admin` / `lab-observability` |
 | Prometheus | `http://192.168.56.10:30090` | `/targets` and raw PromQL |
@@ -242,31 +242,39 @@ treat traffic as HTTP rather than opaque TCP.
 
 ## 6. Exposing an application
 
-**6.1 Use the shared ingress gateway.** It is the supported way to reach an
-application from the workstation. In your namespace, create an Istio `Gateway`
-with `selector: {istio: ingressgateway}` and a `VirtualService` bound to it:
+**6.1 The lab owns the gateway; you bring the routes.** There is one ingress
+path for every application: the lab's Istio ingress gateway, configured by
+one platform-owned `Gateway`, **`istio-ingress/lab-gateway`** — plain HTTP,
+any host, reached from the workstation at `http://192.168.56.10:30880`.
+
+You MUST NOT create a `Gateway` of any kind — neither Istio's
+(`networking.istio.io`) nor the Kubernetes Gateway API's
+(`gateway.networking.k8s.io`, which would make Istio deploy a second gateway
+pod on its own NodePort) — and MUST NOT modify `lab-gateway`. Gateway API
+routes (`HTTPRoute` and friends) cannot attach to the shared gateway, so they
+are not an ingress option here.
+
+What you bring, in your own namespace and your own repository, is a
+`VirtualService` that names the shared gateway:
 
 ```yaml
-apiVersion: networking.istio.io/v1
-kind: Gateway
-metadata: {name: my-app}
-spec:
-  selector: {istio: ingressgateway}
-  servers:
-    - port: {number: 80, name: http, protocol: HTTP}
-      hosts: ["*"]
----
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata: {name: my-app}
 spec:
   hosts: ["*"]
-  gateways: [my-app]
+  gateways: [istio-ingress/lab-gateway]
   http:
     - match: [{uri: {prefix: /my-app/}}]
       rewrite: {uri: /}
       route: [{destination: {host: my-app, port: {number: 8080}}}]
 ```
+
+`gateways` MUST be exactly `istio-ingress/lab-gateway`. Do not add `mesh` to
+this VirtualService — a wildcard host is invalid for in-mesh routing; use a
+separate one for that. The other application-level resources
+(`DestinationRule`, `AuthorizationPolicy`, retries, timeouts, traffic
+splitting) are yours too, under §9.3.
 
 **6.2** There is no DNS, so every tenant shares host `*` and is told apart by
 **path prefix**. Your prefix MUST be `/<your-namespace>/`. You MUST NOT match
@@ -274,7 +282,8 @@ spec:
 across tenants resolve in no defined order. Your application therefore has to
 work when served under a sub-path.
 
-**6.3 NodePorts.** You SHOULD NOT create `NodePort` Services; use the gateway.
+**6.3 NodePorts.** You SHOULD NOT create `NodePort` Services; use the shared
+gateway.
 If you genuinely need one (a non-HTTP protocol, say), get approval, set the
 port explicitly, and never use one already taken. Reserved today:
 
@@ -288,10 +297,9 @@ port explicitly, and never use one already taken. Reserved today:
 
 Check `kubectl get svc -A | grep NodePort` for the live picture.
 
-**6.4** HTTPS on `30843` has no certificate; bring your own via a `Gateway`
-with `tls` if you need it. A Kubernetes Gateway API `Gateway`
-(`gatewayClassName: istio`) is allowed in your namespace, but it deploys an
-additional gateway pod on a randomly allocated NodePort — prefer §6.1.
+**6.4** The shared gateway serves HTTP on port 80 only. HTTPS (`30843` has no
+certificate behind it), host-based routing, or a TCP port on the gateway are
+changes to `lab-gateway` itself: request them (§12).
 
 ## 7. State
 
@@ -367,11 +375,15 @@ pod — count it in §5.4.
 work. Joining those spans into one trace through your service is your job:
 propagate the `traceparent` header (§8.1 does this for instrumented code).
 
-**9.3** Istio resources (`VirtualService`, `DestinationRule`,
-`PeerAuthentication`, `AuthorizationPolicy`, `Telemetry`, `Sidecar`,
-`EnvoyFilter`…) MUST be in your namespace and MUST only select your own
-workloads and hosts. Nothing in `istio-system` — a resource there is
-mesh-wide. Do not assume mTLS `STRICT`.
+**9.3 The split of ownership.** The lab owns the mesh: the control plane,
+the ingress gateway pods, the `Gateway` (§6.1) and anything mesh-wide. You own
+the application-level resources for your own workloads — `VirtualService`,
+`DestinationRule`, `PeerAuthentication`, `AuthorizationPolicy`,
+`RequestAuthentication`, `Telemetry`, `Sidecar`, `ServiceEntry`. They MUST be
+in your namespace and MUST only name your own workloads and hosts; nothing in
+`istio-system` or `istio-ingress`, where a resource is mesh-wide or changes
+the gateway for everyone. `EnvoyFilter` and `WasmPlugin` need approval. Do not
+assume mTLS `STRICT`.
 
 **9.4** `NetworkPolicy` in your own namespace is welcome. Keep ingress from
 `istio-ingress` open if you use the gateway, and from `observability` if
@@ -439,7 +451,7 @@ Before you call a deployment done:
 - [ ] Every `kubectl` command named `--context spellcore-k8s-lab` (§5.1)
 - [ ] Images are pulled from a public registry (not `registry.lab`), pinned by tag or digest (§5.3)
 - [ ] Every container has CPU/memory requests and a memory limit, sidecar included in the total (§5.4, §9.1)
-- [ ] Exposure is via the shared gateway under `/<my-namespace>/` only (§6)
+- [ ] Exposure is a `VirtualService` on `istio-ingress/lab-gateway` under `/<my-namespace>/` only; I created no `Gateway` (§6)
 - [ ] Volumes are bounded by the application and nothing irreplaceable lives in them (§2.1, §7)
 - [ ] `OTEL_SERVICE_NAME` is set; dashboards and alerts pin datasource UIDs (§8)
 - [ ] No real secrets anywhere (§2.2)
