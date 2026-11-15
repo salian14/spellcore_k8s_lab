@@ -458,6 +458,17 @@ so the local `admin` account is the only login) and the notifications
 controller (nowhere to send anything on an isolated network). Both are one
 variable away; see `ansible/README.md`.
 
+## Deploying applications onto the lab
+
+The cluster has one cluster-admin credential and no quotas, so what an
+application developer — human or agent — may and may not do is written down
+rather than enforced.
+[`docs/application-developer-contract.md`](docs/application-developer-contract.md)
+is that agreement: one namespace per application, the reserved namespaces and
+NodePorts, how to expose something through the shared ingress gateway, the
+resource and telemetry obligations, and when to stop and ask. It is
+self-contained, so it can be handed to an agent working in another repository.
+
 ## Customizing
 
 - **Node count, names, IPs, CPU, memory** — the `nodes` map in
