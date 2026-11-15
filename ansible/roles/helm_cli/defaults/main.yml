@@ -2,9 +2,9 @@
 # --- version ---
 # Pinned to the 3.x line deliberately. Helm 4 is current upstream (and is what
 # the workstation runs), but its release notes call out backward-incompatible
-# changes to CLI flags and output -- and k8s_observability's idempotence guards
-# parse `helm status` and `helm repo list -o json` output. Helm on the VM is a
-# private implementation detail of that role, so there's nothing to gain from
+# changes to CLI flags and output -- and the idempotence guards in k8s_istio
+# and k8s_argocd parse `helm status` and `helm repo list -o json` output. Helm
+# on the VM is a private implementation detail of those roles, so there's nothing to gain from
 # tracking 4.x here. Bumping this to a 4.x version is a one-line change plus a
 # re-check of those guards.
 helm_cli_version: "3.21.4"

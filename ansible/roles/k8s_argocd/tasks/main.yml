@@ -37,7 +37,7 @@
 
 # `helm repo list` exits non-zero when no repositories are configured at all,
 # hence failed_when: false and the default('[]') below. Same shape as
-# k8s_observability, which may or may not have run first.
+# k8s_istio, which may or may not have run first.
 - name: List the configured helm repositories
   ansible.builtin.command: "{{ k8s_argocd_helm_binary }} repo list -o json"
   register: k8s_argocd_repo_list
@@ -84,7 +84,7 @@
 
 # --- release ---
 #
-# Same two-task shape as every release in k8s_observability: a `helm status`
+# Same two-task shape as every release in k8s_istio: a `helm status`
 # guard, then an `upgrade --install` gated on "release absent OR rendered values
 # changed". `helm upgrade --install` always exits 0 and mints a new revision on
 # every invocation, so without the gate this role would report `changed` and

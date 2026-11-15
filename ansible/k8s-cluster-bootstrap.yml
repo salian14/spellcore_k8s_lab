@@ -19,7 +19,7 @@
 
 # After the workers have joined, so the readiness check at the end of the role
 # covers every node rather than just the control plane. Lives here rather than
-# in k8s-observability.yml on purpose: metrics.k8s.io is core cluster API
+# with the observability stack under gitops/ on purpose: metrics.k8s.io is core cluster API
 # surface that `kubectl top` and every HorizontalPodAutoscaler depend on, and
 # it must not inherit the failure modes of the telemetry stack.
 - name: Install the metrics server

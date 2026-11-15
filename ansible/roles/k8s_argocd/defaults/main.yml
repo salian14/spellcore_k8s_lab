@@ -13,8 +13,7 @@ k8s_argocd_namespace: argocd
 k8s_argocd_release_name: argocd
 
 # Rendered values file lives here rather than /tmp because it carries the admin
-# password hash. Same posture as k8s_observability_values_dir: 0700 directory,
-# 0600 file.
+# password hash, so it is locked down: 0700 directory, 0600 file.
 k8s_argocd_values_dir: /root/argocd
 
 # --- chart ---
