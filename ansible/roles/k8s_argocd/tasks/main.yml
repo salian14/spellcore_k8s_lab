@@ -1,0 +1,175 @@
+---
+- name: Wait for the Kubernetes API server to become responsive
+  ansible.builtin.command: "kubectl --kubeconfig={{ k8s_argocd_kubeconfig }} get nodes"
+  register: k8s_argocd_api_check
+  until: k8s_argocd_api_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+# The bcrypt salt is the one input the values template can't validate itself:
+# passlib raises a bare ValueError on a bad salt, which surfaces as an opaque
+# template failure. Check it here with a message that says what to fix.
+- name: Check the admin password salt is a valid bcrypt salt
+  ansible.builtin.assert:
+    that:
+      - k8s_argocd_admin_password_salt is match('^[./A-Za-z0-9]{22}$')
+    fail_msg: >-
+      k8s_argocd_admin_password_salt must be exactly 22 characters from
+      [./A-Za-z0-9]; got {{ k8s_argocd_admin_password_salt | length }}.
+
+- name: Check for the Argo CD namespace
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_argocd_kubeconfig }}
+    get namespace {{ k8s_argocd_namespace }}
+  register: k8s_argocd_namespace_check
+  changed_when: false
+  failed_when: false
+
+- name: Create the Argo CD namespace
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_argocd_kubeconfig }}
+    create namespace {{ k8s_argocd_namespace }}
+  changed_when: true
+  when: k8s_argocd_namespace_check.rc != 0
+
+# --- helm repository ---
+
+# `helm repo list` exits non-zero when no repositories are configured at all,
+# hence failed_when: false and the default('[]') below. Same shape as
+# k8s_observability, which may or may not have run first.
+- name: List the configured helm repositories
+  ansible.builtin.command: "{{ k8s_argocd_helm_binary }} repo list -o json"
+  register: k8s_argocd_repo_list
+  changed_when: false
+  failed_when: false
+
+- name: Add the argo helm repository
+  ansible.builtin.command: >-
+    {{ k8s_argocd_helm_binary }} repo add
+    {{ k8s_argocd_helm_repo_name }} {{ k8s_argocd_helm_repo_url }}
+  changed_when: true
+  when: >-
+    k8s_argocd_helm_repo_name not in (k8s_argocd_repo_list.stdout | default('[]', true)
+                                       | from_json | map(attribute='name') | list)
+
+- name: Refresh the helm repository indexes
+  ansible.builtin.command: "{{ k8s_argocd_helm_binary }} repo update"
+  changed_when: false
+
+# --- rendered values file ---
+
+# 0700 because the rendered file carries the admin password hash. A hash is not
+# the password, but bcrypt at 10 rounds on a lab password is not something to
+# leave world-readable in /tmp either.
+- name: Ensure the values directory exists
+  ansible.builtin.file:
+    path: "{{ k8s_argocd_values_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# Registered because its .changed is half of the idempotence gate on the helm
+# release below. no_log keeps the hash (and the diff) out of the task log.
+- name: Render the Argo CD values file
+  ansible.builtin.template:
+    src: argocd-values.yaml.j2
+    dest: "{{ k8s_argocd_values_dir }}/argocd-values.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: k8s_argocd_values
+  no_log: true
+
+# --- release ---
+#
+# Same two-task shape as every release in k8s_observability: a `helm status`
+# guard, then an `upgrade --install` gated on "release absent OR rendered values
+# changed". `helm upgrade --install` always exits 0 and mints a new revision on
+# every invocation, so without the gate this role would report `changed` and
+# push a pointless revision on every provisioning re-run.
+#
+# --wait blocks until every Deployment is Available, which also covers the
+# CRDs: the chart installs them first, and the application controller won't
+# go Ready without them, so the bootstrap Application below can be applied
+# the moment this returns.
+
+- name: Check for an existing Argo CD release
+  ansible.builtin.command: >-
+    {{ k8s_argocd_helm_binary }} status {{ k8s_argocd_release_name }}
+    --kubeconfig={{ k8s_argocd_kubeconfig }}
+    --namespace {{ k8s_argocd_namespace }}
+  register: k8s_argocd_status
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade Argo CD
+  ansible.builtin.command: >-
+    {{ k8s_argocd_helm_binary }} upgrade --install {{ k8s_argocd_release_name }}
+    {{ k8s_argocd_chart }}
+    --version {{ k8s_argocd_chart_version }}
+    --kubeconfig={{ k8s_argocd_kubeconfig }}
+    --namespace {{ k8s_argocd_namespace }}
+    --values {{ k8s_argocd_values_dir }}/argocd-values.yaml
+    --wait --timeout {{ k8s_argocd_helm_timeout }}
+  register: k8s_argocd_install
+  changed_when: k8s_argocd_install.rc == 0
+  when: >-
+    k8s_argocd_status.rc != 0
+    or k8s_argocd_values.changed
+
+# Belt and braces on top of --wait: the gate above skips the helm call on a
+# no-op run, and this is what then confirms the server is actually serving
+# rather than assuming it from a green `helm status`.
+- name: Wait for the Argo CD server to become available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_argocd_kubeconfig }}
+    -n {{ k8s_argocd_namespace }}
+    rollout status deployment/{{ k8s_argocd_release_name }}-server
+    --timeout={{ k8s_argocd_rollout_timeout }}s
+  changed_when: false
+
+# --- bootstrap application ---
+#
+# Only when a repository is configured. Applied with kubectl rather than
+# through the chart's `extraObjects` so that changing the bootstrap repo (or
+# adding one after the fact) doesn't bump the Helm release.
+
+- name: Render the bootstrap Application manifest
+  ansible.builtin.template:
+    src: bootstrap-application.yaml.j2
+    dest: "{{ k8s_argocd_bootstrap_manifest_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: k8s_argocd_bootstrap_repo_url | length > 0
+
+- name: Apply the bootstrap Application
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_argocd_kubeconfig }}
+    apply -f {{ k8s_argocd_bootstrap_manifest_path }}
+  register: k8s_argocd_bootstrap_apply
+  changed_when: "'unchanged' not in k8s_argocd_bootstrap_apply.stdout"
+  when: k8s_argocd_bootstrap_repo_url | length > 0
+
+# --- report ---
+
+- name: Read back the Argo CD workloads
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ k8s_argocd_kubeconfig }}
+    -n {{ k8s_argocd_namespace }} get pods,svc,applications
+  register: k8s_argocd_workloads
+  changed_when: false
+
+- name: Report the Argo CD endpoints
+  ansible.builtin.debug:
+    msg:
+      - "Argo CD UI: {{ k8s_argocd_server_url }}"
+      - "Argo CD login: admin / {{ k8s_argocd_admin_password }}"
+      - "argocd CLI: {{ k8s_argocd_cli_login_command }}"
+      - >-
+        Bootstrap application: {{ k8s_argocd_bootstrap_repo_url
+        if k8s_argocd_bootstrap_repo_url | length > 0
+        else 'none (set k8s_argocd_bootstrap_repo_url to point Argo CD at a repository)' }}
+      - "{{ k8s_argocd_workloads.stdout_lines }}"
