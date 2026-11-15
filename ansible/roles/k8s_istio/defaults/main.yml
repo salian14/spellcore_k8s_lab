@@ -1,0 +1,134 @@
+---
+# --- kubeconfig and helm ---
+# Same convention as the other cluster-facing roles: address the API server
+# through the control plane's admin.conf rather than a KUBECONFIG env var.
+k8s_istio_kubeconfig: /etc/kubernetes/admin.conf
+k8s_istio_helm_binary: /usr/local/bin/helm
+k8s_istio_helm_timeout: 10m
+
+# Control plane in istio-system (the name every Istio doc, tool and default
+# assumes); the ingress gateway in its own namespace, as upstream recommends,
+# so gateway upgrades and RBAC stay separate from istiod's.
+k8s_istio_namespace: istio-system
+k8s_istio_ingress_namespace: istio-ingress
+
+# Rendered values and manifests. 0755 -- nothing here carries credentials, so
+# unlike /root/observability there is no reason to lock it down.
+k8s_istio_values_dir: /root/istio
+
+# --- charts ---
+k8s_istio_helm_repo_name: istio
+k8s_istio_helm_repo_url: https://istio-release.storage.googleapis.com/charts
+
+# One version for all three charts -- Istio publishes base, istiod and gateway
+# in lockstep and mixing versions across them is unsupported. Pinned so a
+# re-provision six months from now deploys what was tested. Istio 1.30 supports
+# Kubernetes 1.32-1.36; the cluster is on k8s_node_prereqs_kubernetes_version
+# 1.35.2.
+k8s_istio_version: "1.30.4"
+k8s_istio_base_chart: istio/base
+k8s_istio_istiod_chart: istio/istiod
+k8s_istio_gateway_chart: istio/gateway
+
+# Release names. `istiod` and `istio-base` are the upstream conventions; the
+# gateway release name doubles as its Deployment/Service name and -- with the
+# `istio-` prefix stripped -- the `istio: ingressgateway` selector label that
+# classic Gateway resources bind to.
+k8s_istio_base_release: istio-base
+k8s_istio_istiod_release: istiod
+k8s_istio_gateway_release: istio-ingressgateway
+
+# --- data plane mode ---
+# Sidecar mode. Ambient (ztunnel + waypoints) is lighter per pod but adds a
+# DaemonSet, the CNI agent and a second mental model; sidecar is what the bulk
+# of the documentation, and every Istio feature, assumes. Switching later means
+# adding the cni and ztunnel charts, not redoing this.
+
+# Namespaces to label istio-injection=enabled. Only affects pods created after
+# the label lands -- existing pods need a restart to pick up a sidecar. Keep
+# the platform namespaces (observability, argocd, kube-system) out of here.
+k8s_istio_injection_namespaces:
+  - default
+
+# --- control plane sizing ---
+# The chart requests 500m/2Gi for istiod, sized for hundreds of services. On
+# two schedulable nodes shared with the telemetry stack that is most of a
+# node's spare memory for an idle control plane.
+k8s_istio_istiod_resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+# One replica, no HPA. The chart enables autoscaling by default; metrics-server
+# is present so it would work, but a lab control plane has nothing to scale for.
+k8s_istio_istiod_autoscale_enabled: false
+
+# Per-sidecar defaults. The chart's 100m/128Mi requests are reasonable but add
+# up quickly against a 2-node budget once every pod in a namespace carries one.
+k8s_istio_proxy_resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# --- mesh configuration ---
+# Envoy access logs to stdout, so `kubectl logs <pod> -c istio-proxy` shows
+# every request through a sidecar or the gateway. Off upstream; worth its cost
+# in a lab where "why did that 503 happen" is the whole point.
+k8s_istio_access_log_file: /dev/stdout
+
+# Tracing into the lab's own telemetry stack. Istio's OpenTelemetry provider
+# ships spans over OTLP/gRPC to the collector gateway the observability role
+# runs, which forwards them to Tempo. Sidecars propagate trace context but
+# cannot join spans across a service that drops the headers -- that part is
+# still the application's job (see docs/observability-for-developers.md).
+#
+# The Telemetry resource that switches this on is applied by this role only
+# when tracing is enabled. If the observability stack is absent the provider
+# simply has nowhere to send spans; nothing breaks.
+k8s_istio_tracing_enabled: true
+k8s_istio_tracing_provider_name: otel-lab
+k8s_istio_otel_collector_service: otel-collector.observability.svc.cluster.local
+k8s_istio_otel_collector_port: 4317
+# Percentage of requests traced. 100 is right for a lab with tens of requests a
+# minute; production would be single digits.
+k8s_istio_tracing_sampling_percentage: 100
+
+# --- ingress gateway ---
+# NodePort because this cluster has no ingress controller and no MetalLB, so
+# the chart's default LoadBalancer Service would sit <pending> forever. Reached
+# at http://192.168.56.10:30880 from the host; NodePorts answer on every node
+# IP, so .11 and .12 work too. Reserved elsewhere: 30080 (fathom), 30300 and
+# 30090 (Grafana, Prometheus), 30800 and 30443 (Argo CD).
+k8s_istio_gateway_node_port_http: 30880
+k8s_istio_gateway_node_port_https: 30843
+k8s_istio_gateway_url: "http://192.168.56.10:{{ k8s_istio_gateway_node_port_http }}"
+k8s_istio_gateway_replicas: 1
+k8s_istio_gateway_autoscaling_enabled: false
+k8s_istio_gateway_resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# --- Kubernetes Gateway API ---
+# The CRDs Istio's Gateway API support (GatewayClass `istio`, HTTPRoute, ...)
+# needs. Istio does not ship them; upstream's instructions are to apply them
+# from the gateway-api release matching the Istio version's docs, which for
+# 1.30 is v1.6.0. Standard channel only -- the experimental channel's CRDs
+# change shape between releases.
+#
+# Applied server-side: the standard-install bundle is ~1.2MB and several of its
+# CRDs individually exceed the 256KB last-applied-configuration annotation a
+# client-side apply would try to write.
+k8s_istio_gateway_api_enabled: true
+k8s_istio_gateway_api_version: "v1.6.0"
+k8s_istio_gateway_api_manifest_url: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ k8s_istio_gateway_api_version }}/standard-install.yaml"
+k8s_istio_gateway_api_manifest_path: "{{ k8s_istio_values_dir }}/gateway-api-{{ k8s_istio_gateway_api_version }}.yaml"
+
+# --- rollout ---
+k8s_istio_rollout_timeout: 300

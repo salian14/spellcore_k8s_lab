@@ -1,0 +1,36 @@
+# Managed by Ansible (role: k8s_istio) -- edits here will be overwritten.
+#
+# Values for istio/istiod. Everything not set here keeps the chart default;
+# the full reference is `helm show values istio/istiod --version
+# {{ k8s_istio_version }}`.
+
+pilot:
+  autoscaleEnabled: {{ k8s_istio_istiod_autoscale_enabled | lower }}
+  replicaCount: 1
+  resources: {{ k8s_istio_istiod_resources | to_json }}
+
+global:
+  istioNamespace: {{ k8s_istio_namespace }}
+  proxy:
+    resources: {{ k8s_istio_proxy_resources | to_json }}
+
+meshConfig:
+  # Merges Envoy's stats with the app's own /metrics on :15020 and annotates the
+  # pod prometheus.io/scrape, which is exactly the job the lab's Prometheus
+  # already runs. Sidecar and gateway metrics therefore land in Grafana with
+  # no further configuration.
+  enablePrometheusMerge: true
+{% if k8s_istio_access_log_file %}
+  accessLogFile: {{ k8s_istio_access_log_file }}
+{% endif %}
+{% if k8s_istio_tracing_enabled %}
+  # Tracing provider only. Declaring it here does not turn tracing on -- the
+  # mesh-wide Telemetry resource this role applies afterwards does that, which
+  # is the Istio 1.2x+ way (the older meshConfig.defaultConfig.tracing block is
+  # deprecated).
+  extensionProviders:
+    - name: {{ k8s_istio_tracing_provider_name }}
+      opentelemetry:
+        service: {{ k8s_istio_otel_collector_service }}
+        port: {{ k8s_istio_otel_collector_port }}
+{% endif %}

@@ -1,0 +1,32 @@
+# Managed by Ansible (role: k8s_istio) -- edits here will be overwritten.
+#
+# Values for istio/gateway, deployed as {{ k8s_istio_gateway_release }} in
+# {{ k8s_istio_ingress_namespace }}. The chart derives the Deployment, Service
+# and the `istio: ingressgateway` selector label from the release name.
+
+replicaCount: {{ k8s_istio_gateway_replicas }}
+autoscaling:
+  enabled: {{ k8s_istio_gateway_autoscaling_enabled | lower }}
+
+resources: {{ k8s_istio_gateway_resources | to_json }}
+
+# NodePort because this cluster has no ingress controller and no MetalLB, so a
+# LoadBalancer Service would sit <pending> forever. status-port stays at the
+# chart default (random NodePort); nothing outside the cluster needs it.
+service:
+  type: NodePort
+  ports:
+    - name: status-port
+      port: 15021
+      protocol: TCP
+      targetPort: 15021
+    - name: http2
+      port: 80
+      protocol: TCP
+      targetPort: 80
+      nodePort: {{ k8s_istio_gateway_node_port_http }}
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: 443
+      nodePort: {{ k8s_istio_gateway_node_port_https }}
