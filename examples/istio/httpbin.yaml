@@ -1,0 +1,57 @@
+---
+# A plain HTTP echo service to prove the mesh and the ingress gateway end to
+# end. Nothing Istio-specific in here: the sidecar arrives because the
+# namespace is labelled istio-injection=enabled, not because of anything in
+# this file.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: httpbin
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: httpbin
+  labels:
+    app: httpbin
+spec:
+  ports:
+    # Named `http` so the sidecar treats the traffic as HTTP rather than
+    # opaque TCP -- that is what gives you per-request access logs, L7
+    # metrics and spans instead of byte counts.
+    - name: http
+      port: 8000
+      targetPort: 8080
+  selector:
+    app: httpbin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpbin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: httpbin
+  template:
+    metadata:
+      labels:
+        app: httpbin
+        # Istio's canonical service/revision labels come from `app` and
+        # `version`; set both so the Kiali-style graphs and the
+        # istio_requests_total series have something to group by.
+        version: v1
+    spec:
+      serviceAccountName: httpbin
+      containers:
+        - name: httpbin
+          image: docker.io/mccutchen/go-httpbin:v2.15.0
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi

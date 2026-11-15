@@ -58,7 +58,7 @@ variable "disk_size" {
 # One entry per node. The IPs are load-bearing well beyond this directory:
 #   - k8s-control's IP is the kubeadm advertise address
 #     (ansible/roles/k8s_control_plane_init/defaults/main.yml) and the host in
-#     the Grafana/Prometheus URLs (ansible/roles/k8s_observability/defaults)
+#     the Grafana/Prometheus NodePort URLs
 #   - all three appear in the generated inventory and the nodes' /etc/hosts
 # Change an IP here and those defaults must move with it.
 variable "nodes" {

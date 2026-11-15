@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: spellcore_k8s_lab
+  role_name: k8s_istio
+  description: >-
+    Deploy the Istio service mesh (sidecar mode) and an ingress gateway from
+    the upstream istio Helm charts, install the Kubernetes Gateway API CRDs,
+    wire mesh tracing into the lab's OpenTelemetry collector and label
+    namespaces for sidecar injection
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

@@ -1,0 +1,18 @@
+# Managed by Ansible (role: k8s_istio) -- edits here will be overwritten.
+#
+# Mesh-wide tracing. A Telemetry resource in the root namespace applies to
+# every workload in the mesh; a namespace or workload can override it with its
+# own. The provider is declared in meshConfig.extensionProviders (see
+# istiod-values.yaml.j2) and points at the lab's OpenTelemetry collector.
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-default
+  namespace: {{ k8s_istio_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+spec:
+  tracing:
+    - providers:
+        - name: {{ k8s_istio_tracing_provider_name }}
+      randomSamplingPercentage: {{ k8s_istio_tracing_sampling_percentage }}

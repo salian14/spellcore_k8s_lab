@@ -14,7 +14,7 @@
 #   ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
 
 # Cluster-scoped, so it runs once from the control plane against admin.conf.
-# helm_cli is here because this is now the only playbook that drives helm.
+# helm_cli is here because this role drives helm (k8s-istio.yml lists it too).
 - name: Deploy Argo CD
   hosts: k8s_control
   become: true

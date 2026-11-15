@@ -3,14 +3,15 @@
 A three-node Kubernetes lab on local VMs. `terraform apply` builds the machines
 and then provisions them the rest of the way: a `kubeadm` cluster with Calico
 networking, metrics-server, trust for the lab image registry, a `kubectl`
-context installed on **your workstation**, and Argo CD — which then deploys
-a Grafana/Tempo/Loki/Prometheus observability backend from this repository's
+context installed on **your workstation**, an Istio service mesh with an
+ingress gateway, and Argo CD — which then deploys a
+Grafana/Tempo/Loki/Prometheus observability backend from this repository's
 [`gitops/`](gitops/) directory. One command, from nothing to a cluster you can
 drive from your own shell.
 
 Terraform (the [`dmacvicar/libvirt`](https://registry.terraform.io/providers/dmacvicar/libvirt)
 provider) owns the VMs, network, disks and cloud-init; the cluster itself is
-Ansible — twelve roles across four playbooks, all idempotent, all listed under
+Ansible — thirteen roles across five playbooks, all idempotent, all listed under
 [Ansible roles](#ansible-roles); and everything that *runs on* the cluster is
 Argo CD reconciling [`gitops/`](gitops/README.md). Ansible's last act is to
 hand over.
@@ -144,10 +145,10 @@ ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
 ```
 
 A cold `terraform apply` is not quick: it downloads the cloud image on the
-first run and installs a cluster, and Argo CD then spends a few more minutes
-pulling the observability stack's images. Re-running the playbooks against a
-healthy lab is a no-op — every role is idempotent and reports `changed=0` on a
-second pass.
+first run, installs a cluster and the Istio charts, and Argo CD then spends a
+few more minutes pulling the observability stack's images. Re-running the
+playbooks against a healthy lab is a no-op — every role is idempotent and
+reports `changed=0` on a second pass.
 
 **Power state.** Terraform doesn't manage it. `virsh -c qemu:///system
 shutdown <node>` halts a VM and `virsh -c qemu:///system start <node>` brings
@@ -191,8 +192,13 @@ playbooks, in this order (see [`terraform/provision.tf`](terraform/provision.tf)
    node; the StorageClass is cluster substrate that everything Argo CD later
    deploys will claim volumes from; the kubeconfig role runs last, so the
    context it hands you points at a complete cluster.
-4. **`ansible/k8s-argocd.yml`** — installs Helm and Argo CD from the upstream
-   chart, exposed on a NodePort with a known admin password, and applies one
+4. **`ansible/k8s-istio.yml`** — installs Helm, the Istio service mesh (sidecar
+   mode) and an ingress gateway on a NodePort, plus the Kubernetes Gateway API
+   CRDs, and points mesh tracing at the observability stack's collector. That
+   collector arrives later, from Argo CD; Istio installs fine without it, the
+   spans just have nowhere to go until it has synced.
+5. **`ansible/k8s-argocd.yml`** — installs Argo CD from the upstream chart,
+   exposed on a NodePort with a known admin password, and applies one
    app-of-apps `Application` pointed at this repository's `gitops/bootstrap`.
    From there Argo CD deploys the observability stack on its own — see
    [GitOps with Argo CD](#gitops-with-argo-cd).
@@ -202,7 +208,7 @@ the guests, and Terraform never runs it. See [Requirements](#requirements).
 
 ## Ansible roles
 
-Twelve roles. Full variable tables and design notes for each are in
+Thirteen roles. Full variable tables and design notes for each are in
 [`ansible/README.md`](ansible/README.md).
 
 | Role | Playbook | Hosts | What it does |
@@ -217,7 +223,8 @@ Twelve roles. Full variable tables and design notes for each are in
 | `k8s_metrics_server` | `k8s-cluster-bootstrap.yml` | control | metrics-server v0.9.0 plus `--kubelet-insecure-tls`, waited on until `kubectl top nodes` actually answers — this is what makes `kubectl top` and HPAs work |
 | `k8s_local_path_storage` | `k8s-cluster-bootstrap.yml` | control | local-path-provisioner v0.0.37, patched to be the cluster's default StorageClass — before this the cluster has none at all |
 | `k8s_host_kubeconfig` | `k8s-cluster-bootstrap.yml` | control → localhost | Writes a `spellcore-k8s-lab` cluster/user/context into **your** kubeconfig and makes it current |
-| `helm_cli` | `k8s-argocd.yml` | control | Installs a pinned, checksum-verified Helm 3.21.4 at `/usr/local/bin/helm` |
+| `helm_cli` | `k8s-istio.yml`, `k8s-argocd.yml` | control | Installs a pinned, checksum-verified Helm 3.21.4 at `/usr/local/bin/helm` |
+| `k8s_istio` | `k8s-istio.yml` | control | Istio 1.30.4 in sidecar mode — `istio-base`, `istiod` and an `istio-ingressgateway` release on NodePort 30880 — Gateway API v1.6.0 CRDs, a mesh-wide `Telemetry` sending spans to the collector, and `istio-injection=enabled` on `default` |
 | `k8s_argocd` | `k8s-argocd.yml` | control | Argo CD v3.5.3 from the `argo/argo-cd` chart, plain-HTTP NodePort, fixed admin password, and the app-of-apps `bootstrap` Application pointed at `gitops/bootstrap` |
 
 ## Using kubectl from your workstation
@@ -348,6 +355,57 @@ the how-to: the `OTEL_*` block to set, what arrives for free, how to query each
 signal, and how to ship your own dashboards and alert rules. Runnable manifests
 are in [`examples/observability/`](examples/observability/).
 
+## Service mesh
+
+`terraform apply` also installs [Istio](https://istio.io/) 1.30.4 in **sidecar
+mode**: the control plane (`istiod`) in `istio-system`, and one ingress gateway
+in `istio-ingress`, exposed as a NodePort so the host can reach it without an
+ingress controller or MetalLB:
+
+| What | Where |
+| --- | --- |
+| Ingress gateway, HTTP | **<http://192.168.56.10:30880>** |
+| Ingress gateway, HTTPS | `192.168.56.10:30843` (no certificate configured; bring your own via a `Gateway` with `tls`) |
+
+It's a NodePort, so `192.168.56.11` and `.12` work too. Until something binds a
+`Gateway` to it, every request gets a `404` from Envoy — that's the gateway
+working, with nothing routed.
+
+The `default` namespace is labelled `istio-injection=enabled`, so pods created
+there get a sidecar (`READY 2/2`). Pods that already existed need a restart to
+pick one up. Add more namespaces through `k8s_istio_injection_namespaces`; the
+platform namespaces (`observability`, `kube-system`, `istio-*`) are
+deliberately left out.
+
+To route something through the gateway, apply an Istio `Gateway` whose
+`selector` is `istio: ingressgateway` and a `VirtualService` bound to it — or
+the Kubernetes Gateway API equivalent, whose CRDs are installed too.
+[`examples/istio/`](examples/istio/) has both, with an `httpbin` to point them
+at:
+
+```bash
+kubectl -n default apply -f examples/istio/httpbin.yaml -f examples/istio/gateway.yaml
+curl -s http://192.168.56.10:30880/httpbin/get
+```
+
+**The mesh is wired into the observability stack.** Every sidecar and the
+gateway merge Envoy's stats into a `prometheus.io/scrape`-annotated endpoint
+that the lab's Prometheus already scrapes, so `istio_requests_total` and
+friends are queryable at <http://192.168.56.10:30090> with no configuration.
+A mesh-wide `Telemetry` resource sends 100% of request spans to the
+OpenTelemetry collector, which forwards them to Tempo — so Explore → Tempo in
+Grafana shows gateway and sidecar spans for every request, and an application
+that propagates `traceparent` (see
+[`docs/observability-for-developers.md`](docs/observability-for-developers.md))
+fills in the spans between them. Envoy access logs go to each proxy's stdout:
+`kubectl logs <pod> -c istio-proxy`.
+
+What's deliberately *not* here: ambient mode (ztunnel/waypoints — sidecar is
+what the documentation and every feature assume), `istio-cni` (sidecar init
+containers do the iptables work themselves, which kubeadm permits), mTLS
+`STRICT` (the default is `PERMISSIVE`, so unmeshed namespaces keep talking to
+meshed ones), and Kiali. Design notes and the full variable table are in
+[`ansible/README.md`](ansible/README.md#istio-role).
 ## GitOps with Argo CD
 
 `terraform apply` also installs [Argo CD](https://argo-cd.readthedocs.io/) in
@@ -416,6 +474,9 @@ variable away; see `ansible/README.md`.
   `ansible/host_vars/k8s-control.yml` (untracked) and override there rather than
   editing role defaults; the `k8s_argocd_*` variables are listed in
   [`ansible/README.md`](ansible/README.md#argo-cd-role).
+- **Istio NodePorts, injection namespaces, sizing, tracing** — same file,
+  `ansible/host_vars/k8s-control.yml`; the `k8s_istio_*` variables are listed
+  in [`ansible/README.md`](ansible/README.md#istio-role).
 - **Observability credentials, NodePorts, retention, volume sizes, chart
   versions** — the files under `gitops/observability/`, committed and merged
   to `bifrost`. Not Ansible variables any more; see
@@ -442,6 +503,9 @@ variable away; see `ansible/README.md`.
 kubectl get nodes -o wide                      # three Ready nodes, InternalIP 192.168.56.x
 kubectl top nodes                              # metrics-server is serving
 kubectl get sc                                 # local-path (default)
+kubectl -n istio-system get pods               # istiod
+kubectl -n istio-ingress get pods,svc          # the ingress gateway, NodePort 30880
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.56.10:30880/   # 404 from Envoy = gateway up, nothing routed
 kubectl -n argocd get applications             # bootstrap, platform, observability and their components -- Synced / Healthy
 kubectl -n platform get pods                   # the object store
 kubectl -n observability get pods              # the stack's pods, once Argo CD has synced them
