@@ -16,6 +16,30 @@ Ansible — thirteen roles across five playbooks, all idempotent, all listed und
 Argo CD reconciling [`gitops/`](gitops/README.md). Ansible's last act is to
 hand over.
 
+## Platform NodePorts
+
+The cluster has no ingress controller and no MetalLB, so everything the
+platform exposes to the host is a fixed NodePort. They answer on every node IP;
+the URLs below use `k8s-control` (`192.168.56.10`), and `.11` / `.12` work too.
+
+| NodePort | Service | Use it for | Set in |
+|----------|---------|------------|--------|
+| `30300` | Grafana — <http://192.168.56.10:30300> (`admin` / `lab-observability`) | Dashboards, and Explore over traces (Tempo), logs (Loki) and metrics. See [Observability](#observability). | [`gitops/observability/values/grafana.yaml`](gitops/observability/values/grafana.yaml) |
+| `30090` | Prometheus — <http://192.168.56.10:30090> | Raw PromQL and the HTTP API, and `/targets` for "why is this metric missing?" — the one page Grafana can't show. | [`gitops/observability/values/prometheus.yaml`](gitops/observability/values/prometheus.yaml) |
+| `30800` | Argo CD UI and API, plain HTTP — <http://192.168.56.10:30800> (`admin` / `lab-argocd`) | Watching and syncing the `gitops/` Applications, and `argocd login … --plaintext`. See [GitOps with Argo CD](#gitops-with-argo-cd). | `k8s_argocd_server_node_port` |
+| `30443` | Argo CD, the chart's mandatory second Service port | Nothing — the server runs insecure, so this is a plain-HTTP duplicate of `30800`, not a TLS listener. Listed so you don't reuse it. | `k8s_argocd_server_node_port_https` |
+| `30880` | Istio ingress gateway, HTTP — <http://192.168.56.10:30880> | The way into your own workloads from the host: bind a `Gateway` and route to a Service. Envoy answers `404` until something does. See [Service mesh](#service-mesh). | `k8s_istio_gateway_node_port_http` |
+| `30843` | Istio ingress gateway, HTTPS | TLS ingress, once you supply a `Gateway` with a `tls` server and a certificate Secret; none is configured out of the box. | `k8s_istio_gateway_node_port_https` |
+
+The `k8s_*` variables are Ansible role defaults — override them in
+`ansible/host_vars/k8s-control.yml` (see [Customizing](#customizing)).
+
+Two things that are *not* in the table: `30080` is deliberately left free for
+fathom/fathom-agent, which this repository doesn't deploy, so don't hand it to
+anything else; and a Kubernetes Gateway API `Gateway` provisions its own
+gateway Deployment with an allocated — not fixed — NodePort (see
+[`examples/istio/`](examples/istio/README.md)).
+
 ## The VMs
 
 Three libvirt/KVM guests cloned from the official Ubuntu 24.04 (noble) cloud
