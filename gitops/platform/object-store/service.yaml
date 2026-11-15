@@ -1,0 +1,26 @@
+# The S3 endpoint consumers are pointed at --
+# object-store.platform.svc.cluster.local:8333 -- under a vendor-neutral name
+# so swapping the implementation again is a change to this directory only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: object-store
+  namespace: platform
+  labels:
+    app.kubernetes.io/name: object-store
+  annotations:
+    # Picked up by the Prometheus chart's kubernetes-service-endpoints scrape
+    # job, same as MinIO's Service was.
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9327"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: object-store
+  ports:
+    - name: s3
+      port: 8333
+      targetPort: s3
+    - name: metrics
+      port: 9327
+      targetPort: metrics

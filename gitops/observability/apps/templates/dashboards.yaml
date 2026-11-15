@@ -1,0 +1,18 @@
+# Wave 5: the cluster dashboards, as labelled ConfigMaps for Grafana's sidecar.
+# After Grafana, so the sidecar is already running and picks these up over its
+# WATCH. Applying them first would also work -- the sidecar LISTs on startup --
+# but this way a dashboard-only change doesn't depend on the release having
+# converged first.
+#
+# ServerSideApply, and not the default client-side apply: client-side apply
+# stores a copy of the whole manifest in the last-applied-configuration
+# annotation, which doubles the object size -- node-exporter-full at ~460KB
+# would land at ~920KB against a 1MiB limit, and the next revision of that
+# dashboard would push it over. Same reason each dashboard is its own
+# ConfigMap rather than one holding all seven.
+{{ include "observability.directoryApplication" (dict
+  "root" .
+  "name" "dashboards"
+  "wave" 5
+  "path" "gitops/observability/dashboards"
+  "syncOptions" (list "ServerSideApply=true")) }}

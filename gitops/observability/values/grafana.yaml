@@ -1,23 +1,29 @@
----
-# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
-adminUser: "{{ k8s_observability_grafana_admin_user }}"
-# adminPassword is the sanctioned route and lands in a Secret. Do NOT instead
-# set security.admin_password under grafana.ini: the chart's
-# assertNoLeakedSecrets helper aborts the render when a sensitive key appears in
-# plaintext there.
-adminPassword: "{{ k8s_observability_grafana_admin_password }}"
+# Values for the grafana/grafana chart, synced by Argo CD from this file (see
+# gitops/observability/apps/templates/grafana.yaml).
+
+# The admin login comes from the grafana-admin Secret in
+# gitops/observability/credentials, through the chart's existingSecret route
+# -- which lands the values in the container as GF_SECURITY_ADMIN_USER /
+# _PASSWORD. Do NOT instead set security.admin_password under grafana.ini: the
+# chart's assertNoLeakedSecrets helper aborts the render when a sensitive key
+# appears in plaintext there.
+admin:
+  existingSecret: grafana-admin
+  userKey: admin-user
+  passwordKey: admin-password
 
 # NodePort because this cluster has no ingress controller and no MetalLB, so a
 # LoadBalancer Service would sit <pending> forever. Answers on all three node
-# IPs over the lab network.
+# IPs over the lab network: http://192.168.56.10:30300. 30080 is already taken
+# by fathom/fathom-agent, 30090 by Prometheus and 30800 by Argo CD.
 service:
   type: NodePort
-  nodePort: {{ k8s_observability_grafana_node_port }}
+  nodePort: 30300
 
 persistence:
   enabled: true
-  size: {{ k8s_observability_grafana_pvc_size }}
-  storageClassName: {{ k8s_observability_storage_class }}
+  size: 2Gi
+  storageClassName: local-path
 
 # Off, and it has to be. The chart's init container runs `chown -R 472:472
 # /var/lib/grafana` as uid 0 but with capabilities drop: [ALL], add: [CHOWN] --
@@ -45,7 +51,8 @@ testFramework:
 # watching the cluster for labelled ConfigMaps and dropping their contents into
 # Grafana's provisioning directories. This is what lets an application in any
 # namespace ship its own dashboards and alert rules alongside its own manifests,
-# instead of every dashboard having to be added to this file.
+# instead of every dashboard having to be added to this file. The seven cluster
+# dashboards in gitops/observability/dashboards arrive the same way.
 #
 # searchNamespace ALL is the whole point, and it depends on `rbac.namespaced`
 # staying at its default of false -- that is what makes the chart create a
@@ -54,13 +61,17 @@ testFramework:
 sidecar:
   dashboards:
     enabled: true
-    label: {{ k8s_observability_grafana_sidecar_dashboards_label }}
-    searchNamespace: {{ k8s_observability_grafana_sidecar_search_namespace }}
+    # Presence of the label is what matches; the chart leaves `labelValue`
+    # empty, so the sidecar never compares the value. "1" is convention.
+    label: grafana_dashboard
+    searchNamespace: ALL
     # ConfigMaps only. The chart's default is `both`, which opens a second
     # cluster-wide WATCH over every Secret in the cluster to support dashboards
     # nobody here ships as Secrets.
     resource: configmap
-    folderAnnotation: {{ k8s_observability_grafana_sidecar_folder_annotation }}
+    # Which annotation names the Grafana folder a dashboard lands in. It only
+    # works alongside provider.foldersFromFilesStructure below.
+    folderAnnotation: grafana_folder
     provider:
       # Load-bearing for folderAnnotation above: the sidecar writes each
       # ConfigMap to /tmp/dashboards/<annotation>/ and Grafana takes the folder
@@ -81,9 +92,14 @@ sidecar:
   # UI unless the payload carries `x-disable-provenance`.
   alerts:
     enabled: true
-    label: {{ k8s_observability_grafana_sidecar_alerts_label }}
-    searchNamespace: {{ k8s_observability_grafana_sidecar_search_namespace }}
+    label: grafana_alert
+    searchNamespace: ALL
     resource: configmap
+
+# Deliberately NOT setting the chart's `defaultFolderName`: it moves both the
+# sidecar's FOLDER and the provider's path down to /tmp/dashboards/<name>, which
+# still works but adds a level for no gain here. Left unset, an un-annotated
+# ConfigMap lands in Grafana's General folder.
 
 # Provisioned at startup so the stack is usable without any click-through
 # setup. The tracesToLogsV2 / derivedFields pairing below is what lets a span in
@@ -105,7 +121,7 @@ datasources:
         # 3200, not 3100. Tempo's HTTP API and Loki's are different ports, and
         # pointing this at 3100 gives a datasource that saves cleanly and then
         # returns nothing.
-        url: http://{{ k8s_observability_tempo_service }}:{{ k8s_observability_tempo_http_port }}
+        url: http://tempo.observability.svc.cluster.local:3200
         # Deliberately still Tempo, not Prometheus, so Explore keeps opening on
         # traces the way it always has. The conventional arrangement makes the
         # metrics datasource default; this lab prefers traces first. Grafana
@@ -146,7 +162,7 @@ datasources:
         type: loki
         uid: loki
         access: proxy
-        url: http://{{ k8s_observability_loki_service }}:{{ k8s_observability_loki_http_port }}
+        url: http://loki.observability.svc.cluster.local:3100
         jsonData:
           derivedFields:
             # trace_id arrives as structured metadata via Loki's OTLP ingest,
@@ -162,15 +178,15 @@ datasources:
         access: proxy
         # Port 80, not 9090: the chart's Service publishes the container's 9090
         # on servicePort 80. The Service is `prometheus-server`, not
-        # `prometheus` -- see the note in defaults/main.yml.
-        url: http://{{ k8s_observability_prometheus_service }}:{{ k8s_observability_prometheus_http_port }}
+        # `prometheus` -- the chart names it <release>-server.
+        url: http://prometheus-server.observability.svc.cluster.local:80
         # No isDefault here on purpose -- Tempo keeps it, see above.
         jsonData:
           # The metrics -> traces jump. Prometheus stores an exemplar's trace id
           # under the `trace_id` label, and this turns that into a link into
           # Tempo. Requires --enable-feature=exemplar-storage on the server,
-          # which prometheus-values.yaml.j2 sets; without it exemplars are
-          # dropped at ingest and this quietly does nothing.
+          # which prometheus.yaml sets; without it exemplars are dropped at
+          # ingest and this quietly does nothing.
           exemplarTraceIdDestinations:
             - name: trace_id
               datasourceUid: tempo

@@ -1,0 +1,25 @@
+# --- where the manifests live ---
+# Overridden by the parent Application in gitops/bootstrap, so this stack
+# normally tracks whatever branch the bootstrap Application was pointed at;
+# the defaults here are for rendering the chart by hand.
+repoURL: https://github.com/salian14/spellcore_k8s_lab.git
+targetRevision: bifrost
+
+# --- destinations ---
+argocdNamespace: argocd
+project: default
+# Shared services get their own namespace, apart from any consumer's. A
+# consumer reaches a service by its cluster DNS name
+# (<service>.platform.svc.cluster.local) and holds its own credentials.
+namespace: platform
+
+# --- sync ---
+# How a failed sync is retried before the Application is marked Degraded. The
+# first sync of a fresh cluster races PVC binding and image pulls, so a few
+# retries with backoff are expected, not a sign of trouble.
+retry:
+  limit: 5
+  backoff:
+    duration: 15s
+    factor: 2
+    maxDuration: 3m

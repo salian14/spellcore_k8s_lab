@@ -106,7 +106,7 @@
 
 # Server-side, and it has to be: several of these CRDs are over the 256KB
 # annotation limit a client-side apply would trip on, same trap as the
-# dashboard ConfigMaps in k8s_observability. `unchanged` in the output is the
+# dashboard ConfigMaps under gitops/observability. `unchanged` in the output is the
 # only idempotence signal apply gives.
 - name: Apply the Gateway API CRDs
   ansible.builtin.command: >-
@@ -119,7 +119,7 @@
 
 # --- releases, in dependency order ---
 #
-# Each release follows the same two-task shape as k8s_observability: a
+# Each release follows the same two-task shape as k8s_argocd: a
 # `helm status` guard, then an `upgrade --install` gated on "release absent OR
 # rendered values changed". `helm upgrade --install` always exits 0 and mints a
 # new revision on every invocation, so without the gate every provisioning

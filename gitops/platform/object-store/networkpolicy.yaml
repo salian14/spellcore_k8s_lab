@@ -1,0 +1,27 @@
+# `weed mini` is one process that also listens on its master, volume, filer,
+# admin and gRPC ports, and none of those carry authentication -- the filer's
+# HTTP API on 8888 is unauthenticated read/write access to every object. Only
+# S3 (which does check credentials) and the metrics port are meant to be
+# reached from outside the pod, so everything else is closed here. Calico
+# enforces this; with a CNI that ignores NetworkPolicy the extra ports would
+# be open to the cluster, so check that before swapping the CNI.
+#
+# No `from`, so the two allowed ports accept traffic from any namespace --
+# which they must: the kubelet's readiness probe arrives on 8333 from the node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: object-store
+  namespace: platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: object-store
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8333
+        - protocol: TCP
+          port: 9327

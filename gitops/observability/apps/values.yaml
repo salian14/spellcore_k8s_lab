@@ -1,0 +1,66 @@
+# --- where the values files live ---
+# The five Helm-sourced Applications are multi-source: the chart comes from its
+# upstream repository, the values file from THIS repository at
+# gitops/observability/values/<name>.yaml. These two settings name the
+# repository and revision that second source reads from. Both are overridden by
+# the parent Application in gitops/bootstrap, so they normally track whatever
+# branch the bootstrap Application was pointed at; the defaults here are for
+# rendering the chart by hand.
+repoURL: https://github.com/salian14/spellcore_k8s_lab.git
+targetRevision: bifrost
+
+# --- destinations ---
+argocdNamespace: argocd
+project: default
+# Everything lands in one namespace, separate from application workloads. The
+# collector's Service is still reachable cluster-wide; see gitops/README.md.
+namespace: observability
+
+# --- upstream charts ---
+# Pinned so a re-provision six months from now deploys what was tested, not
+# whatever is newest. Chart NAME is pinned alongside each version because of
+# the tempo/tempo-distributed trap: both ship appVersion 2.9.0, but
+# tempo-distributed is the microservices chart and would deploy eight separate
+# components into a cluster with two schedulable nodes.
+#
+# The object store Tempo and Loki flush to is not part of this stack at all:
+# it is a platform service (gitops/platform/object-store), synced before this
+# stack by gitops/bootstrap, and this stack holds its own credentials for it.
+charts:
+  # The plain server chart, not kube-prometheus-stack. That one brings a
+  # CRD-installing operator, a second Grafana, and CRDs `helm upgrade` refuses
+  # to update -- none of which this lab wants. kube-state-metrics and
+  # node-exporter come along as bundled subcharts; they are not separate
+  # releases.
+  prometheus:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    name: prometheus
+    version: "29.25.0" # appVersion v3.13.2
+  tempo:
+    repoURL: https://grafana.github.io/helm-charts
+    name: tempo
+    version: "1.24.4" # appVersion 2.9.0
+  loki:
+    repoURL: https://grafana.github.io/helm-charts
+    name: loki
+    version: "7.3.0" # appVersion 3.6.12
+  otelCollector:
+    repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
+    name: opentelemetry-collector
+    version: "0.170.0" # appVersion 0.158.0
+  grafana:
+    repoURL: https://grafana.github.io/helm-charts
+    name: grafana
+    version: "10.5.15" # appVersion 12.3.1
+
+# --- sync ---
+# How a failed sync is retried before the Application is marked Degraded. The
+# first sync of a fresh cluster races PVC binding, image pulls and the
+# object-store buckets, so a few retries with backoff are expected, not a sign
+# of trouble.
+retry:
+  limit: 5
+  backoff:
+    duration: 15s
+    factor: 2
+    maxDuration: 3m

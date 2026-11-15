@@ -29,6 +29,20 @@
     - role: k8s_metrics_server
       when: k8s_metrics_server_enabled | default(true)
 
+# The cluster has no StorageClass at all after kubeadm. This lived in the old
+# observability playbook, but it is cluster substrate rather than a workload:
+# every PersistentVolumeClaim Argo CD ever syncs (the telemetry stack today,
+# whatever comes next) sits Pending without it, and Argo CD has no way to
+# express "install the provisioner before you exist". So it goes in here with
+# the CNI and metrics-server, and the boundary stays clean: Ansible builds the
+# cluster, Argo CD fills it.
+- name: Install the default StorageClass
+  hosts: k8s_control
+  become: true
+  roles:
+    - role: k8s_local_path_storage
+      when: k8s_local_path_storage_enabled | default(true)
+
 # Runs last, once the cluster is complete, so the context it installs on the
 # workstation is immediately usable. Targets k8s_control only to read
 # admin.conf off it -- the kubeconfig work itself is delegated to localhost.

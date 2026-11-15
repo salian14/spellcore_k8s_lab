@@ -1,0 +1,7 @@
+# Wave 4: last of the workloads, because its provisioned datasources name the
+# Tempo, Loki and Prometheus Services.
+{{ include "observability.helmApplication" (dict
+  "root" .
+  "name" "grafana"
+  "wave" 4
+  "chart" .Values.charts.grafana) }}

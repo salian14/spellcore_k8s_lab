@@ -119,21 +119,35 @@ k8s_argocd_small_component_resources:
     memory: 256Mi
 
 # --- bootstrap application (app-of-apps) ---
-# The GitOps hand-off point. When k8s_argocd_bootstrap_repo_url is set, the role
-# applies one Application that points Argo CD at that repository, and every
-# further Application, ApplicationSet and Project is expected to come from
-# there rather than from this role. Left empty (the default) nothing is applied
-# and Argo CD comes up with no applications -- add them through the UI, the
-# CLI, or by setting this and re-running the playbook.
+# The GitOps hand-off point. The role applies one Application that points Argo
+# CD at the gitops/bootstrap chart in this repository, and every further
+# Application, ApplicationSet and Project comes from there rather than from
+# Ansible -- the observability stack is the first thing that does. Set the URL
+# to "" to apply nothing and bring Argo CD up empty.
 #
 # The repository must be reachable from the cluster (public HTTPS is the easy
 # case; the lab network is NAT'd so github.com works). Private repositories
 # need a repo credential in the argocd namespace first, which this role does
 # not manage.
-k8s_argocd_bootstrap_repo_url: ""
-k8s_argocd_bootstrap_repo_path: bootstrap
-k8s_argocd_bootstrap_repo_revision: HEAD
+#
+# The revision is the environment: the lab cluster tracks `bifrost`, the
+# test/dev branch. To try a feature branch on the cluster, override this in
+# host_vars/k8s-control.yml with the branch name and re-run the playbook --
+# every Application under gitops/ follows it, since the chart passes the
+# revision down as a Helm parameter (see k8s_argocd_bootstrap_helm_parameters).
+k8s_argocd_bootstrap_repo_url: https://github.com/salian14/spellcore_k8s_lab.git
+k8s_argocd_bootstrap_repo_path: gitops/bootstrap
+k8s_argocd_bootstrap_repo_revision: bifrost
 k8s_argocd_bootstrap_app_name: bootstrap
+# Helm parameters passed to the bootstrap chart, rendered as `helm.parameters`
+# on the Application. gitops/bootstrap is a Helm chart precisely so that these
+# two can be injected once here instead of being hard-coded in every child
+# Application's second (values) source. Set to {} when pointing the role at a
+# plain directory of manifests rather than a chart -- Argo CD refuses a `helm:`
+# block on a source with no Chart.yaml.
+k8s_argocd_bootstrap_helm_parameters:
+  repoURL: "{{ k8s_argocd_bootstrap_repo_url }}"
+  targetRevision: "{{ k8s_argocd_bootstrap_repo_revision }}"
 k8s_argocd_bootstrap_project: default
 # Where the bootstrap app's OWN manifests land -- normally the argocd namespace,
 # since an app-of-apps produces Applications, which must live there. Child

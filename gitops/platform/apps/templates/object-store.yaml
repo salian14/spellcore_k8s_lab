@@ -1,0 +1,9 @@
+# Wave 1: the S3 object store. It creates every consumer's buckets on startup,
+# and its readiness probe is what ends the wave -- so by the time the
+# application stacks sync (they come after the whole platform stack in
+# gitops/bootstrap), the buckets and identities exist.
+{{ include "platform.directoryApplication" (dict
+  "root" .
+  "name" "object-store"
+  "wave" 1
+  "path" "gitops/platform/object-store") }}

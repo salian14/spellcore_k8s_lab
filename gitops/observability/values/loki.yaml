@@ -1,5 +1,5 @@
----
-# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+# Values for the grafana/loki chart, synced by Argo CD from this file (see
+# gitops/observability/apps/templates/loki.yaml).
 #
 # This chart's defaults are the most dangerous of the five. Out of the box it is
 # SimpleScalable with read/write/backend at three replicas each, plus an nginx
@@ -39,13 +39,19 @@ loki:
     use_thanos_objstore: false
     # Required by the templates but absent from the chart's own values.yaml;
     # omitting it fails with "Please define loki.storage.bucketNames.chunks".
+    # Both buckets are declared in the platform object store's Deployment,
+    # which creates them on startup; this stack's identity is scoped to them.
     bucketNames:
-      chunks: {{ k8s_observability_loki_chunks_bucket }}
-      ruler: {{ k8s_observability_loki_ruler_bucket }}
+      chunks: loki-chunks
+      ruler: loki-ruler
     s3:
-      endpoint: {{ k8s_observability_minio_service }}:9000
-      accessKeyId: "{{ k8s_observability_minio_root_user }}"
-      secretAccessKey: "{{ k8s_observability_minio_root_password }}"
+      # The platform object store; see gitops/platform/object-store.
+      endpoint: object-store.platform.svc.cluster.local:8333
+      # Placeholders, expanded from the environment at startup -- see
+      # singleBinary.extraArgs / extraEnv below. The keys themselves live only
+      # in the object-store-credentials Secret.
+      accessKeyId: ${S3_ACCESS_KEY_ID}
+      secretAccessKey: ${S3_SECRET_ACCESS_KEY}
       s3ForcePathStyle: true
       insecure: true
       region: us-east-1
@@ -56,7 +62,7 @@ loki:
     delete_request_store: s3
 
   limits_config:
-    retention_period: {{ k8s_observability_loki_retention }}
+    retention_period: 168h
     # Required for the OTLP ingest path: trace_id and span_id arrive as
     # structured metadata, which is what makes the Grafana log-to-trace jump
     # work at all.
@@ -64,7 +70,22 @@ loki:
     volume_enabled: true
 
 singleBinary:
-  replicas: 1 # chart default is 0 -- forget this and Helm reports success on an empty release
+  replicas: 1 # chart default is 0 -- forget this and the release is empty
+  # -config.expand-env substitutes ${...} in the rendered config from the
+  # container environment; extraEnv is what puts the S3 keys there.
+  extraArgs:
+    - -config.expand-env=true
+  extraEnv:
+    - name: S3_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: object-store-credentials
+          key: access-key
+    - name: S3_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: object-store-credentials
+          key: secret-key
   resources:
     requests:
       cpu: 300m
@@ -74,8 +95,8 @@ singleBinary:
       memory: 2Gi
   persistence:
     enabled: true
-    size: {{ k8s_observability_loki_pvc_size }}
-    storageClass: {{ k8s_observability_storage_class }}
+    size: 10Gi
+    storageClass: local-path
 
 # Mandatory: these default to 3 each, and templates/validate.yaml calls fail
 # when singleBinary.replicas and any scalable replica are both non-zero.
@@ -98,7 +119,7 @@ lokiCanary:
 test:
   enabled: false # must also be false: validate.yaml fails if the canary is off but this is on
 minio:
-  enabled: false # we run MinIO as its own release, shared with Tempo
+  enabled: false # the object store is its own Application, shared with Tempo
 sidecar:
   rules:
     enabled: false # injects a k8s-sidecar container into the loki pod

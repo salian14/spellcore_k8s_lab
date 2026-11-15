@@ -1,0 +1,46 @@
+{{- if .Values.platform.enabled }}
+# The platform stack: shared services that application stacks consume and
+# that have no opinion about who consumes them -- the S3 object store today.
+# See gitops/platform/apps.
+#
+# Wave 0: before every application stack, so that by the time one syncs, the
+# services it depends on (and the buckets and identities it was issued) exist.
+# Argo CD holds the next wave until this Application reports Healthy, which
+# needs the Application health check the k8s_argocd role adds to argocd-cm.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform
+  namespace: {{ .Values.argocdNamespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  # Deleting this Application cascades to every service it created rather
+  # than orphaning them.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.project }}
+  source:
+    repoURL: {{ .Values.repoURL }}
+    targetRevision: {{ .Values.targetRevision }}
+    path: {{ .Values.platform.path }}
+    helm:
+      # Pass the repository and revision down, so the component Applications
+      # read their manifests from the same branch this chart came from.
+      parameters:
+        - name: repoURL
+          value: {{ .Values.repoURL | quote }}
+        - name: targetRevision
+          value: {{ .Values.targetRevision | quote }}
+  destination:
+    # Its own manifests are Applications, which must land in the Argo CD
+    # namespace. The components choose their own destination.
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.argocdNamespace }}
+  syncPolicy:
+    automated:
+      # prune removes services whose Application left the repo; selfHeal
+      # reverts kubectl edits made behind Argo CD's back.
+      prune: true
+      selfHeal: true
+{{- end }}

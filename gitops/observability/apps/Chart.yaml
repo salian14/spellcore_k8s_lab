@@ -1,0 +1,8 @@
+apiVersion: v2
+name: observability-apps
+description: >-
+  The Argo CD Applications that make up the observability stack -- one per
+  component, ordered by sync wave. Rendered by Argo CD from the `observability`
+  Application in gitops/bootstrap.
+type: application
+version: 0.1.0

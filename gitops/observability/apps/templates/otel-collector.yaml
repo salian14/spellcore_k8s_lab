@@ -1,0 +1,7 @@
+# Wave 3: after the backends, so the collector isn't retrying against absent
+# exporters during its first few seconds.
+{{ include "observability.helmApplication" (dict
+  "root" .
+  "name" "otel-collector"
+  "wave" 3
+  "chart" .Values.charts.otelCollector) }}

@@ -1,0 +1,7 @@
+# Wave 2: needs the credentials Secret (wave 0) and Prometheus (wave 1). The
+# `tempo` bucket comes from the platform stack, synced before this one.
+{{ include "observability.helmApplication" (dict
+  "root" .
+  "name" "tempo"
+  "wave" 2
+  "chart" .Values.charts.tempo) }}

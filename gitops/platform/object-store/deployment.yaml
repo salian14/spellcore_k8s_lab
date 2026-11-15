@@ -1,0 +1,167 @@
+# SeaweedFS in `mini` mode: master, volume server, filer and S3 gateway in one
+# process on one volume -- the single-node shape MinIO's `standalone` mode had.
+# Chosen over the SeaweedFS Helm chart, which deploys those as separate
+# StatefulSets with a PVC each, and over Garage, whose cluster layout has to be
+# assigned by hand after install. See gitops/README.md for the comparison.
+#
+# This is a PLATFORM service: it has no opinion about who uses it. Consumers
+# (the observability stack today) each get their own S3 identity, scoped to
+# their own buckets, and hold a copy of that identity in their own namespace.
+# Adding a consumer is three edits in this directory, all marked "TENANTS":
+# its buckets in -bucket below, its identity in the init container's JSON,
+# and its keys in credentials/object-store-identities.yaml.
+#
+# Pinned by image tag. SeaweedFS cuts a release most weeks; bump deliberately.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: object-store
+  namespace: platform
+  labels:
+    app.kubernetes.io/name: object-store
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: the PVC is ReadWriteOnce on a
+  # WaitForFirstConsumer local-path volume, so a surge pod scheduled onto the
+  # other worker could never bind it and the rollout would deadlock on every
+  # image bump.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: object-store
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: object-store
+    spec:
+      initContainers:
+        # SeaweedFS takes S3 identities from a JSON file, not from flags or the
+        # environment. Rendering that file here from the identities Secret
+        # keeps the keys in one place (the Secret) rather than duplicated in a
+        # second, JSON-shaped Secret that could drift from the first.
+        #
+        # TENANTS: one identity per consumer, with actions scoped to that
+        # consumer's buckets (`Action:bucket`), plus an unscoped admin identity
+        # for a human with `aws --endpoint-url` or `weed shell`. A consumer's
+        # identity can read, write and list only its own buckets, and cannot
+        # create any (bucket names are still visible via ListBuckets).
+        #
+        # `command` overrides the image entrypoint on purpose: the entrypoint
+        # would otherwise treat `sh` as a weed subcommand.
+        - name: render-s3-config
+          image: chrislusf/seaweedfs:4.47
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              cat > /config/s3.json <<EOF
+              {"identities": [
+                {"name": "admin",
+                 "credentials": [{"accessKey": "$ADMIN_ACCESS_KEY", "secretKey": "$ADMIN_SECRET_KEY"}],
+                 "actions": ["Admin", "Read", "Write", "List", "Tagging"]},
+                {"name": "observability",
+                 "credentials": [{"accessKey": "$OBSERVABILITY_ACCESS_KEY", "secretKey": "$OBSERVABILITY_SECRET_KEY"}],
+                 "actions": ["Read:tempo", "Write:tempo", "List:tempo", "Tagging:tempo",
+                             "Read:loki-chunks", "Write:loki-chunks", "List:loki-chunks", "Tagging:loki-chunks",
+                             "Read:loki-ruler", "Write:loki-ruler", "List:loki-ruler", "Tagging:loki-ruler"]}
+              ]}
+              EOF
+          env:
+            - name: ADMIN_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-store-identities
+                  key: admin-access-key
+            - name: ADMIN_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-store-identities
+                  key: admin-secret-key
+            - name: OBSERVABILITY_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-store-identities
+                  key: observability-access-key
+            - name: OBSERVABILITY_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-store-identities
+                  key: observability-secret-key
+          volumeMounts:
+            - name: s3-config
+              mountPath: /config
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:4.47
+          # No `command`: the image entrypoint starts as root, chowns /data to
+          # the `seaweed` user on first boot, and drops privileges with
+          # su-exec before exec'ing weed. Setting runAsNonRoot here would skip
+          # that chown and leave the volume unwritable.
+          args:
+            - mini
+            - -dir=/data
+            # 127.0.0.1 is the address the in-process components use to reach
+            # each other; the pod IP changes on every restart and this doesn't.
+            # ip.bind is what the listeners actually bind, and 0.0.0.0 is what
+            # makes S3 reachable through the Service.
+            - -ip=127.0.0.1
+            - -ip.bind=0.0.0.0
+            # The identity file the init container rendered.
+            - -s3.config=/etc/seaweedfs/s3.json
+            # TENANTS: every consumer's buckets, created on startup if absent
+            # -- the job MinIO's post-install hook did. Only declared buckets
+            # exist: autoCreateBucket is off, so a consumer writing to a bucket
+            # not listed here gets NoSuchBucket rather than a silently new one.
+            - -bucket=tempo,loki-chunks,loki-ruler
+            - -s3.autoCreateBucket=false
+            # 20 volumes of 1GiB, matching the 20Gi PVC. Left at the default
+            # (`-volume.max=0`, auto-size to free disk) SeaweedFS would size
+            # itself to the node's root filesystem, since local-path enforces
+            # no quota.
+            - -master.volumeSizeLimitMB=1024
+            - -volume.max=20
+            # Ports that nothing here uses. The admin UI, master, volume and
+            # filer listeners cannot be switched off but are closed by
+            # networkpolicy.yaml.
+            - -webdav=false
+            - -admin.ui=false
+            - -s3.port.iceberg=0
+            - -s3.port.lance=0
+            - -metricsPort=9327
+          ports:
+            - name: s3
+              containerPort: 8333
+            - name: metrics
+              containerPort: 9327
+          # /status on the S3 port answers 200 without credentials; / does
+          # not (403 for anonymous), so don't probe that.
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: s3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: s3
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: s3-config
+              mountPath: /etc/seaweedfs
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: object-store-data
+        - name: s3-config
+          emptyDir: {}

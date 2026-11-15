@@ -1,0 +1,7 @@
+# Wave 2: needs the credentials Secret (wave 0). The `loki-chunks` and
+# `loki-ruler` buckets come from the platform stack, synced before this one.
+{{ include "observability.helmApplication" (dict
+  "root" .
+  "name" "loki"
+  "wave" 2
+  "chart" .Values.charts.loki) }}

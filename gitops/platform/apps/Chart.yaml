@@ -1,0 +1,8 @@
+apiVersion: v2
+name: platform-apps
+description: >-
+  The Argo CD Applications for the platform stack -- shared services that
+  more than one application stack consumes, synced before any of them.
+  Rendered by Argo CD from the `platform` Application in gitops/bootstrap.
+type: application
+version: 0.1.0

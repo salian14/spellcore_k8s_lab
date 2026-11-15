@@ -13,7 +13,7 @@ k8s_istio_namespace: istio-system
 k8s_istio_ingress_namespace: istio-ingress
 
 # Rendered values and manifests. 0755 -- nothing here carries credentials, so
-# unlike /root/observability there is no reason to lock it down.
+# unlike /root/argocd there is no reason to lock it down.
 k8s_istio_values_dir: /root/istio
 
 # --- charts ---
@@ -46,7 +46,8 @@ k8s_istio_gateway_release: istio-ingressgateway
 
 # Namespaces to label istio-injection=enabled. Only affects pods created after
 # the label lands -- existing pods need a restart to pick up a sidecar. Keep
-# the platform namespaces (observability, argocd, kube-system) out of here.
+# the platform namespaces (observability, platform, argocd, kube-system) out
+# of here.
 k8s_istio_injection_namespaces:
   - default
 
@@ -81,14 +82,15 @@ k8s_istio_proxy_resources:
 k8s_istio_access_log_file: /dev/stdout
 
 # Tracing into the lab's own telemetry stack. Istio's OpenTelemetry provider
-# ships spans over OTLP/gRPC to the collector gateway the observability role
-# runs, which forwards them to Tempo. Sidecars propagate trace context but
+# ships spans over OTLP/gRPC to the collector gateway Argo CD deploys from
+# gitops/observability, which forwards them to Tempo. Sidecars propagate trace context but
 # cannot join spans across a service that drops the headers -- that part is
 # still the application's job (see docs/observability-for-developers.md).
 #
 # The Telemetry resource that switches this on is applied by this role only
-# when tracing is enabled. If the observability stack is absent the provider
-# simply has nowhere to send spans; nothing breaks.
+# when tracing is enabled. If the observability stack is absent -- or Argo CD
+# has not synced it yet -- the provider simply has nowhere to send spans;
+# nothing breaks.
 k8s_istio_tracing_enabled: true
 k8s_istio_tracing_provider_name: otel-lab
 k8s_istio_otel_collector_service: otel-collector.observability.svc.cluster.local

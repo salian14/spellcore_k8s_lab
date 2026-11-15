@@ -1,5 +1,5 @@
----
-# Managed by Ansible (role: k8s_observability) -- edits here will be overwritten.
+# Values for the open-telemetry/opentelemetry-collector chart, synced by Argo CD
+# from this file (see gitops/observability/apps/templates/otel-collector.yaml).
 #
 # A single gateway Deployment, not a DaemonSet. Traces and logs are pushed to it
 # over OTLP, so there is nothing node-local to collect; a DaemonSet would only
@@ -14,11 +14,16 @@ fullnameOverride: otel-collector
 # Both mandatory in chart 0.170.0: values.yaml ships image.repository: "" and
 # templates/NOTES.txt calls fail "[ERROR] 'image.repository' must be set.".
 # command.name must match the distro's binary name.
+#
+# The otelcol-k8s distro is the small one and is sufficient: its release
+# manifest includes otlpreceiver, k8seventsreceiver, k8sattributesprocessor,
+# batch, memory_limiter and the otlp/otlphttp exporters. The much larger
+# contrib image is not needed.
 image:
-  repository: {{ k8s_observability_otel_image_repository }}
-  tag: "{{ k8s_observability_otel_image_tag }}"
+  repository: otel/opentelemetry-collector-k8s
+  tag: "0.158.0"
 command:
-  name: {{ k8s_observability_otel_command_name }}
+  name: otelcol-k8s
 
 resources:
   requests:
@@ -92,12 +97,12 @@ config:
   exporters:
     debug: null
     otlp/tempo:
-      endpoint: {{ k8s_observability_tempo_service }}:4317
+      endpoint: tempo.observability.svc.cluster.local:4317
       tls:
         insecure: true
     otlphttp/loki:
       # Loki 3.x exposes a native OTLP ingest path at /otlp/v1/logs.
-      endpoint: http://{{ k8s_observability_loki_service }}:{{ k8s_observability_loki_http_port }}/otlp
+      endpoint: http://loki.observability.svc.cluster.local:3100/otlp
     otlphttp/prometheus:
       # Prometheus 3 ingests OTLP natively; this is otlphttp rather than the
       # more obvious prometheusremotewrite because the pinned
@@ -108,8 +113,12 @@ config:
       #
       # otlphttp appends /v1/metrics to the endpoint, so the path Prometheus
       # actually receives on is /api/v1/otlp/v1/metrics. Enabled there by the
-      # web.enable-otlp-receiver flag in prometheus-values.yaml.j2.
-      endpoint: http://{{ k8s_observability_prometheus_service }}:{{ k8s_observability_prometheus_http_port }}/api/v1/otlp
+      # web.enable-otlp-receiver flag in prometheus.yaml.
+      #
+      # `prometheus-server`, not `prometheus`: the chart names the server
+      # Service <release>-server. Port 80, not 9090: 9090 is the container
+      # port, published on servicePort 80.
+      endpoint: http://prometheus-server.observability.svc.cluster.local:80/api/v1/otlp
 
   service:
     pipelines:
