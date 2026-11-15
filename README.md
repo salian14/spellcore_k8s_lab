@@ -28,8 +28,8 @@ the URLs below use `k8s-control` (`192.168.56.10`), and `.11` / `.12` work too.
 | `30090` | Prometheus — <http://192.168.56.10:30090> | Raw PromQL and the HTTP API, and `/targets` for "why is this metric missing?" — the one page Grafana can't show. | [`gitops/observability/values/prometheus.yaml`](gitops/observability/values/prometheus.yaml) |
 | `30800` | Argo CD UI and API, plain HTTP — <http://192.168.56.10:30800> (`admin` / `lab-argocd`) | Watching and syncing the `gitops/` Applications, and `argocd login … --plaintext`. See [GitOps with Argo CD](#gitops-with-argo-cd). | `k8s_argocd_server_node_port` |
 | `30443` | Argo CD, the chart's mandatory second Service port | Nothing — the server runs insecure, so this is a plain-HTTP duplicate of `30800`, not a TLS listener. Listed so you don't reuse it. | `k8s_argocd_server_node_port_https` |
-| `30880` | Istio ingress gateway, HTTP — <http://192.168.56.10:30880> | The way into your own workloads from the host: bind a `Gateway` and route to a Service. Envoy answers `404` until something does. See [Service mesh](#service-mesh). | `k8s_istio_gateway_node_port_http` |
-| `30843` | Istio ingress gateway, HTTPS | TLS ingress, once you supply a `Gateway` with a `tls` server and a certificate Secret; none is configured out of the box. | `k8s_istio_gateway_node_port_https` |
+| `30880` | Istio ingress gateway, HTTP — <http://192.168.56.10:30880> | The way into your own workloads from the host: bind a `Gateway` and route to a Service. Until a `Gateway` exists Envoy has no listener behind this port, so connections are **refused** — expected on a fresh cluster. See [Service mesh](#service-mesh). | `k8s_istio_gateway_node_port_http` |
+| `30843` | Istio ingress gateway, HTTPS | TLS ingress, once you supply a `Gateway` with a `tls` server and a certificate Secret; none is configured out of the box, so this is refused too. | `k8s_istio_gateway_node_port_https` |
 
 The `k8s_*` variables are Ansible role defaults — override them in
 `ansible/host_vars/k8s-control.yml` (see [Customizing](#customizing)).
