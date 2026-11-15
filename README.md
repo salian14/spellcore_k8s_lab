@@ -374,8 +374,8 @@ working, with nothing routed.
 The `default` namespace is labelled `istio-injection=enabled`, so pods created
 there get a sidecar (`READY 2/2`). Pods that already existed need a restart to
 pick one up. Add more namespaces through `k8s_istio_injection_namespaces`; the
-platform namespaces (`observability`, `kube-system`, `istio-*`) are
-deliberately left out.
+platform namespaces (`observability`, `platform`, `argocd`, `kube-system`,
+`istio-*`) are deliberately left out.
 
 To route something through the gateway, apply an Istio `Gateway` whose
 `selector` is `istio: ingressgateway` and a `VirtualService` bound to it — or

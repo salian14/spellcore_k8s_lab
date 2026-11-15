@@ -21,8 +21,8 @@
   changed_when: "'unchanged' not in k8s_local_path_storage_apply.stdout"
 
 # There is no Ready condition on a StorageClass, so the provisioner Deployment
-# becoming Available is the real signal. Without this wait the Helm releases in
-# k8s_observability can race ahead and their PVCs sit Pending with no
+# becoming Available is the real signal. Without this wait the applications
+# Argo CD syncs from gitops/ can race ahead and their PVCs sit Pending with no
 # provisioner listening.
 - name: Wait for the local-path-provisioner deployment to become available
   ansible.builtin.command: >-

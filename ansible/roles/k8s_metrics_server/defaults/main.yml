@@ -7,9 +7,10 @@ k8s_metrics_server_kubeconfig: /etc/kubernetes/admin.conf
 # --- metrics-server ---
 # Applied from the upstream release manifest via kubectl, matching
 # k8s_local_path_storage and k8s_kubeconfig_cni rather than the helm pattern in
-# k8s_observability. That is deliberate: helm only exists on the VM because
-# k8s-observability.yml installs helm_cli, and metrics.k8s.io is core cluster
-# API surface that must not acquire a dependency on the telemetry stack.
+# k8s_istio and k8s_argocd. That is deliberate: helm only reaches the VM in
+# the later k8s-istio.yml and k8s-argocd.yml playbooks, and metrics.k8s.io is
+# core cluster API surface that must not acquire a dependency on anything
+# installed after the cluster itself.
 #
 # v0.9.0 builds against Kubernetes 1.36.2; the cluster is on
 # k8s_node_prereqs_kubernetes_version 1.35.2.

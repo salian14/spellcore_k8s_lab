@@ -352,11 +352,11 @@ All variables live in `ansible/roles/k8s_node_prereqs/defaults/main.yml`.
 
 ## Cluster bootstrap roles
 
-Five roles that take the `spellcore_k8s_lab` nodes from "prerequisites installed"
+Six roles that take the `spellcore_k8s_lab` nodes from "prerequisites installed"
 (the `k8s_node_prereqs` state above) to a running, `Ready` cluster you can
 drive from your own workstation: `k8s_control_plane_init`,
 `k8s_kubeconfig_cni`, `k8s_cluster_join`, `k8s_metrics_server`,
-`k8s_host_kubeconfig`. Like `k8s_node_prereqs`, they're invoked automatically
+`k8s_local_path_storage`, `k8s_host_kubeconfig`. Like `k8s_node_prereqs`, they're invoked automatically
 by `terraform apply` (`k8s-cluster-bootstrap.yml`, run right after
 `k8s-node-prereqs.yml` and `k8s-registry-trust.yml`) rather than run by hand
 with `ansible-playbook -i inventory.ini`.
@@ -376,9 +376,9 @@ testing, from the repo root:
 ansible-playbook -i terraform/inventory.ini ansible/k8s-cluster-bootstrap.yml
 ```
 
-### Why five roles, run in this order
+### Why six roles, run in this order
 
-`k8s-cluster-bootstrap.yml` runs five plays, one role each, strictly in
+`k8s-cluster-bootstrap.yml` runs six plays, one role each, strictly in
 sequence:
 
 1. **`k8s_control_plane_init`** (`hosts: k8s_control`) — installs `etcdctl`
@@ -400,15 +400,25 @@ sequence:
    `metrics-server` manifest, patches in `--kubelet-insecure-tls`, and waits
    until `kubectl top nodes` actually answers. This is what makes
    `kubectl top` and HorizontalPodAutoscaler resource metrics work.
-5. **`k8s_host_kubeconfig`** (`hosts: k8s_control`) — reads `admin.conf` off
+5. **`k8s_local_path_storage`** (`hosts: k8s_control`) — applies the upstream
+   local-path-provisioner manifest, marks its `local-path` class as the
+   cluster default, and waits for the provisioner Deployment to become
+   Available. A kubeadm cluster starts with no StorageClass at all, and
+   everything Argo CD deploys later claims volumes from this one. Variables
+   are under [Storage and Helm roles](#storage-and-helm-roles).
+6. **`k8s_host_kubeconfig`** (`hosts: k8s_control`) — reads `admin.conf` off
    `k8s-control` and writes a `spellcore-k8s-lab` cluster/user/context into the
    kubeconfig on **your workstation**, then makes it the current context.
 
 The CNI is deliberately installed **before** workers join (play 2 before
 play 3), not after — so no worker ever sits around joined but without pod
 networking. Play 4 comes after the join so its readiness check covers every
-node, not just the control plane. Play 5 runs last so the context it hands you
-points at a cluster that's already complete.
+node, not just the control plane. Play 5 is here rather than in Argo CD's
+tree because Argo CD cannot express "install the provisioner before the
+applications that need it exist": the StorageClass is cluster substrate, so
+Ansible owns it and the boundary stays "Ansible builds the cluster, Argo CD
+fills it". Play 6 runs last so the context it hands you points at a cluster
+that's already complete.
 
 ### `k8s_control_plane_init` role variables
 
@@ -722,15 +732,16 @@ either playbook stays runnable on its own.
 
 **Helm 3, not 4.** Helm 4 is current upstream and is what the workstation
 runs, but its release notes call out backward-incompatible changes to CLI flags
-and output, and `k8s_argocd`'s idempotence guards parse `helm status` and
-`helm repo list -o json`. Helm on the VM is a private detail of that role.
+and output, and the idempotence guards in `k8s_istio` and `k8s_argocd` parse
+`helm status` and `helm repo list -o json`. Helm on the VM is a private detail
+of those two roles.
 Bumping to 4.x is a one-line change plus a re-check of those guards.
 
 All variables live in `ansible/roles/helm_cli/defaults/main.yml`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `helm_cli_version` | `3.21.4` | Pinned Helm release. Bumping to 4.x is a one-line change plus a re-check of `k8s_argocd`'s output-parsing guards. |
+| `helm_cli_version` | `3.21.4` | Pinned Helm release. Bumping to 4.x is a one-line change plus a re-check of the output-parsing guards in `k8s_istio` and `k8s_argocd`. |
 | `helm_cli_sha256` | `61f88ab1…` | Checksum from the published `.sha256sum`. `get_url` verifies against it, so a corrupted download fails the play. |
 | `helm_cli_arch` | `linux-amd64` | Release archive flavour. |
 | `helm_cli_url` | `https://get.helm.sh/helm-v…tar.gz` | Download location. |
@@ -758,31 +769,6 @@ points at that stack's collector, which Argo CD deploys from
 `gitops/observability/` a few minutes later; until it has synced, spans are
 dropped. The playbook lists `helm_cli` before `k8s_istio`, which makes it
 runnable on its own.
-
-## Argo CD role
-
-Deploys [Argo CD](https://argo-cd.readthedocs.io/) — the GitOps controller
-that continuously reconciles the cluster against manifests in a git
-repository — into its own `argocd` namespace, from the upstream
-[`argo/argo-cd`](https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd)
-chart, and then hands the cluster over to it: one app-of-apps `Application`
-pointed at this repository's [`gitops/bootstrap`](../gitops/README.md) is the
-last thing Ansible applies, and everything the cluster runs from then on —
-the observability stack first — comes from that tree.
-
-Helm is driven as a CLI via `command`, never through `kubernetes.core`, so no
-collections are needed: a pinned chart version, a values file rendered to
-`/root/argocd/`, a `helm status` guard and an `upgrade --install` gated on
-"release absent or values changed".
-
-### How it's invoked
-
-`terraform apply` runs `k8s-argocd.yml` last, after `k8s-cluster-bootstrap.yml`
-(see `../terraform/provision.tf`). The playbook lists `helm_cli` first because
-this role drives `helm`. Argo CD itself needs no
-StorageClass — its state lives in Kubernetes objects and a non-persistent Redis
-cache — but the stack it deploys does, which is why the bootstrap playbook's
-`k8s_local_path_storage` play has to have run first.
 
 Re-run by hand against the running VMs from the repo root:
 
@@ -924,6 +910,35 @@ All variables live in `ansible/roles/k8s_istio/defaults/main.yml`.
 - **`helm upgrade --install` can't report idempotence by itself** — same gate
   as `k8s_argocd`: "release absent or values changed". Three releases,
   three gates.
+
+## Argo CD role
+
+Deploys [Argo CD](https://argo-cd.readthedocs.io/) — the GitOps controller
+that continuously reconciles the cluster against manifests in a git
+repository — into its own `argocd` namespace, from the upstream
+[`argo/argo-cd`](https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd)
+chart, and then hands the cluster over to it: one app-of-apps `Application`
+pointed at this repository's [`gitops/bootstrap`](../gitops/README.md) is the
+last thing Ansible applies, and everything the cluster runs from then on —
+the observability stack first — comes from that tree.
+
+Helm is driven as a CLI via `command`, never through `kubernetes.core`, so no
+collections are needed: a pinned chart version, a values file rendered to
+`/root/argocd/`, a `helm status` guard and an `upgrade --install` gated on
+"release absent or values changed".
+
+### How it's invoked
+
+`terraform apply` runs `k8s-argocd.yml` last, after `k8s-cluster-bootstrap.yml`
+(see `../terraform/provision.tf`). The playbook lists `helm_cli` first because
+this role drives `helm`. Argo CD itself needs no
+StorageClass — its state lives in Kubernetes objects and a non-persistent Redis
+cache — but the stack it deploys does, which is why the bootstrap playbook's
+`k8s_local_path_storage` play has to have run first.
+
+Re-run by hand against the running VMs from the repo root:
+
+```bash
 ansible-playbook -i terraform/inventory.ini ansible/k8s-argocd.yml
 ```
 

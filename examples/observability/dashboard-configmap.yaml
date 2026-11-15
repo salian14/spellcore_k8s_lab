@@ -3,7 +3,7 @@
 #
 # Grafana's `grafana-sc-dashboard` sidecar watches every namespace for ConfigMaps
 # carrying the `grafana_dashboard` label, writes them into Grafana's provisioning
-# directory and reloads. Nothing in the k8s_observability role changes.
+# directory and reloads. Nothing under gitops/observability/ changes.
 #
 # Apply with --server-side once the JSON gets large: a client-side apply also
 # stores the whole object in a last-applied-configuration annotation, which
