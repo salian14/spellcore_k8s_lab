@@ -4,7 +4,8 @@ Everything the cluster *runs* is declared here and deployed by
 [Argo CD](https://argo-cd.readthedocs.io/). Ansible builds the cluster and
 installs Argo CD (see [`ansible/README.md`](../ansible/README.md)); Argo CD
 then reads this directory and makes the cluster match it. Today that is two
-stacks: **platform** (shared services — the S3 object store) and
+stacks: **platform** (shared services — the S3 object store and the shared
+ingress `Gateway`) and
 **observability** (Grafana, Tempo, Loki, Prometheus and the collector, which
 consume it). Anything added later goes in beside them; see
 [What goes where](#what-goes-where).
@@ -27,6 +28,7 @@ gitops/
 ├── platform/                     # shared services, synced before every application stack
 │   ├── apps/                     # Helm chart: one Application per service, ordered by sync wave
 │   ├── credentials/              # object-store-identities: every S3 identity the store knows (plaintext -- see below)
+│   ├── ingress/                  # the one Istio Gateway every application's VirtualService binds to
 │   └── object-store/             # SeaweedFS: Deployment, PVC, Service, NetworkPolicy
 └── observability/                # an application stack: consumes the platform, owns nothing shared
     ├── apps/                     # Helm chart: one Application per component, ordered by sync wave
@@ -62,6 +64,7 @@ The platform stack:
 | Wave | Application | Source | Why here |
 | --- | --- | --- | --- |
 | 0 | `object-store-identities` | `platform/credentials/` | Every S3 identity the store knows about. Also creates the `platform` namespace. |
+| 0 | `ingress-gateway` | `platform/ingress/` | The shared Istio `Gateway`, in `istio-ingress`. Depends on nothing here — only on the Istio CRDs Ansible installed. |
 | 1 | `object-store` | `platform/object-store/` | Creates every consumer's buckets on startup; its readiness is what ends the wave — and, one level up, the platform stack. |
 
 Then the observability stack:
@@ -131,6 +134,7 @@ notices within 60 seconds. Some examples:
 | A chart version | `observability/apps/values.yaml` (`charts.<name>.version`) |
 | Grafana's login, or this stack's S3 keys | `observability/credentials/` (see [Credentials](#credentials)) |
 | The object store's image or volume cap | `platform/object-store/deployment.yaml` |
+| What the shared ingress gateway accepts (HTTPS, hosts, ports) | `platform/ingress/gateway.yaml` |
 | A new consumer of the object store (buckets + identity) | the three `TENANTS` markers under `platform/` (see [Adding a consumer](#adding-a-consumer)) |
 | A bundled dashboard | the JSON under `observability/dashboards/` (see [Dashboards and alerts](#dashboards-and-alerts)) |
 
@@ -180,7 +184,36 @@ the override) and re-run to return to `bifrost`.
 
 ## The platform stack
 
-Shared services with a pod. One today.
+Shared services: the object store, and the ingress `Gateway` every
+application routes through.
+
+### The shared ingress gateway
+
+`platform/ingress/gateway.yaml` is one Istio `Gateway`,
+`istio-ingress/lab-gateway`: HTTP on port 80 of the ingress gateway pods
+(NodePort `30880`), any host, open to `VirtualService`s from every namespace.
+Applications do not create Gateways; they bring a `VirtualService` with
+`gateways: [istio-ingress/lab-gateway]` and a `/<namespace>/` path prefix
+([contract, §6](../docs/application-developer-contract.md#6-exposing-an-application)).
+
+- **Why the platform owns it.** Every `Gateway` selecting the same pods on
+  the same port is merged into one Envoy listener, so a Gateway per
+  application isolates nothing — it only scatters the answer to "what does
+  `:30880` accept" across every tenant's repository. One definition here
+  means HTTPS or host-based routing is later a single change.
+- **Why it is here and not in the `k8s_istio` role.** The role installs the
+  mesh and the gateway *pods*. The `Gateway` is configuration that tenants
+  consume, changes with them, and should deploy on a merge rather than a
+  playbook run — the platform test in [What goes where](#what-goes-where),
+  minus the pod.
+- **It needs Istio's CRDs.** They come from Ansible, which runs before Argo
+  CD is installed, so the kind always exists by the first sync. A lab built
+  with `k8s_istio_enabled: false` has to set `ingressGateway.enabled: false`
+  in `platform/apps/values.yaml`, or the platform stack never goes Healthy
+  and the application stacks wait behind it.
+- **Routes from different applications share one virtual host** (`*`), and
+  Istio merges them in no guaranteed order. That is why the contract gives
+  each application its own path prefix and forbids matching `/`.
 
 ### The object store: SeaweedFS, and why not MinIO
 

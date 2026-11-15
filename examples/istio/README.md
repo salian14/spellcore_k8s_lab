@@ -6,8 +6,8 @@ section of the root README.
 | File | What it shows |
 | --- | --- |
 | `httpbin.yaml` | A plain HTTP service, nothing Istio-specific in it; the sidecar arrives via the namespace label |
-| `gateway.yaml` | Exposing it through the installed ingress gateway with Istio's `Gateway` + `VirtualService` |
-| `gateway-api.yaml` | The same route with the Kubernetes Gateway API `Gateway` + `HTTPRoute`; Istio deploys a gateway for it |
+| `virtualservice.yaml` | Exposing it through the lab's shared ingress gateway: a `VirtualService` bound to the platform-owned `istio-ingress/lab-gateway`, and no `Gateway` of its own |
+| `gateway-api.yaml` | The same route with the Kubernetes Gateway API `Gateway` + `HTTPRoute`; Istio deploys a *separate* gateway for it. Here to show the difference — applications use the shared gateway (see [the contract](../../docs/application-developer-contract.md#6-exposing-an-application)) |
 
 ## Trying them out
 
@@ -17,10 +17,13 @@ role, so deploy there:
 ```bash
 kubectl -n default apply -f httpbin.yaml
 kubectl -n default get pods -l app=httpbin     # READY 2/2 -- the second container is the sidecar
-kubectl -n default apply -f gateway.yaml       # or gateway-api.yaml, not both
+kubectl -n default apply -f virtualservice.yaml   # or gateway-api.yaml, not both
 ```
 
-Then from the host, through the installed gateway's NodePort:
+The `VirtualService` attaches to `istio-ingress/lab-gateway`, which Argo CD
+deploys from `gitops/platform/ingress/` — check it is there with
+`kubectl -n istio-ingress get gateways.networking.istio.io`. Then from the
+host, through the shared gateway's NodePort:
 
 ```bash
 curl -s http://192.168.56.10:30880/httpbin/get
@@ -57,5 +60,5 @@ Every request shows up three ways:
 Clean up:
 
 ```bash
-kubectl -n default delete -f gateway.yaml -f httpbin.yaml   # or gateway-api.yaml
+kubectl -n default delete -f virtualservice.yaml -f httpbin.yaml   # or gateway-api.yaml
 ```

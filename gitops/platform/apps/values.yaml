@@ -13,6 +13,15 @@ project: default
 # (<service>.platform.svc.cluster.local) and holds its own credentials.
 namespace: platform
 
+# --- components ---
+# The shared Istio Gateway (gitops/platform/ingress). It is an Istio custom
+# resource, so it needs the CRDs the k8s_istio Ansible role installs. A lab
+# built with `k8s_istio_enabled: false` must switch this off too: the sync
+# would fail on the missing kind, the platform stack would never report
+# Healthy, and every application stack behind it would wait forever.
+ingressGateway:
+  enabled: true
+
 # --- sync ---
 # How a failed sync is retried before the Application is marked Degraded. The
 # first sync of a fresh cluster races PVC binding and image pulls, so a few

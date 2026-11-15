@@ -1,0 +1,30 @@
+---
+# Exposes httpbin through the lab's shared ingress gateway. There is no
+# Gateway in this file on purpose: the platform owns the one Gateway
+# (istio-ingress/lab-gateway, from gitops/platform/ingress/) and an
+# application only brings the VirtualService that attaches a route to it.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: httpbin
+spec:
+  hosts:
+    # No DNS in the lab, so every application shares the wildcard host and is
+    # told apart by the path prefix below.
+    - "*"
+  gateways:
+    # <namespace>/<name>, because the Gateway lives in another namespace. Do
+    # not add `mesh` here: a wildcard host is not valid for in-mesh routing,
+    # so that belongs in a separate VirtualService.
+    - istio-ingress/lab-gateway
+  http:
+    - match:
+        - uri:
+            prefix: /httpbin/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: httpbin
+            port:
+              number: 8000

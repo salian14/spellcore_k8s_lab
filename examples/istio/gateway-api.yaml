@@ -1,6 +1,7 @@
 ---
 # The same route with the Kubernetes Gateway API, which Istio treats as the
-# preferred ingress API. Two differences from gateway.yaml worth knowing:
+# preferred ingress API. Two differences from virtualservice.yaml worth
+# knowing:
 #
 # 1. A Gateway API `Gateway` makes Istio deploy a NEW gateway Deployment and
 #    Service for it -- it does not bind to the istio-ingressgateway the
@@ -17,7 +18,9 @@
 #
 # 2. The rewrite is a filter on the route rather than a field on the match.
 #
-# Apply gateway.yaml OR this file, not both -- they both claim /httpbin/.
+# Apply virtualservice.yaml OR this file, not both -- they both claim
+# /httpbin/. This one is a demonstration: applications deployed onto the lab
+# use the shared gateway (docs/application-developer-contract.md, section 6).
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:

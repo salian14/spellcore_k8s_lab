@@ -391,9 +391,9 @@ ingress controller or MetalLB:
 | Ingress gateway, HTTP | **<http://192.168.56.10:30880>** |
 | Ingress gateway, HTTPS | `192.168.56.10:30843` (no certificate configured; bring your own via a `Gateway` with `tls`) |
 
-It's a NodePort, so `192.168.56.11` and `.12` work too. Until something binds a
-`Gateway` to it, every request gets a `404` from Envoy — that's the gateway
-working, with nothing routed.
+It's a NodePort, so `192.168.56.11` and `.12` work too. Until a `VirtualService`
+routes something through it, every request gets a `404` from Envoy — that's
+the gateway working, with nothing routed.
 
 The `default` namespace is labelled `istio-injection=enabled`, so pods created
 there get a sidecar (`READY 2/2`). Pods that already existed need a restart to
@@ -401,14 +401,19 @@ pick one up. Add more namespaces through `k8s_istio_injection_namespaces`; the
 platform namespaces (`observability`, `platform`, `argocd`, `kube-system`,
 `istio-*`) are deliberately left out.
 
-To route something through the gateway, apply an Istio `Gateway` whose
-`selector` is `istio: ingressgateway` and a `VirtualService` bound to it — or
-the Kubernetes Gateway API equivalent, whose CRDs are installed too.
-[`examples/istio/`](examples/istio/) has both, with an `httpbin` to point them
-at:
+**The platform owns the `Gateway`; applications bring only routes.** One
+Istio `Gateway`, `istio-ingress/lab-gateway`, binds port 80 of those gateway
+pods for every host. It is deployed by Argo CD from
+[`gitops/platform/ingress/`](gitops/platform/ingress/), not by Ansible, so it
+arrives with the platform stack. To route something through it, apply a
+`VirtualService` in the application's own namespace with
+`gateways: [istio-ingress/lab-gateway]` and a path prefix — no `Gateway` of
+its own. [`examples/istio/`](examples/istio/) has one, with an `httpbin` to
+point it at (and, for comparison, the Kubernetes Gateway API route, which
+deploys a separate gateway instead of using the shared one):
 
 ```bash
-kubectl -n default apply -f examples/istio/httpbin.yaml -f examples/istio/gateway.yaml
+kubectl -n default apply -f examples/istio/httpbin.yaml -f examples/istio/virtualservice.yaml
 curl -s http://192.168.56.10:30880/httpbin/get
 ```
 
@@ -482,6 +487,19 @@ so the local `admin` account is the only login) and the notifications
 controller (nowhere to send anything on an isolated network). Both are one
 variable away; see `ansible/README.md`.
 
+## Deploying applications onto the lab
+
+The cluster has one cluster-admin credential and no quotas, so what an
+application developer — human or agent — may and may not do is written down
+rather than enforced.
+[`docs/application-developer-contract.md`](docs/application-developer-contract.md)
+is that agreement: one namespace per application, deployed by the tenant's
+own Argo CD `Application` from their own repository with images from a public
+registry; the reserved namespaces and NodePorts; how to attach a
+`VirtualService` to the platform-owned ingress `Gateway`; the resource and telemetry obligations;
+and when to stop and ask. It is
+self-contained, so it can be handed to an agent working in another repository.
+
 ## Customizing
 
 - **Node count, names, IPs, CPU, memory** — the `nodes` map in
@@ -529,6 +547,7 @@ kubectl top nodes                              # metrics-server is serving
 kubectl get sc                                 # local-path (default)
 kubectl -n istio-system get pods               # istiod
 kubectl -n istio-ingress get pods,svc          # the ingress gateway, NodePort 30880
+kubectl -n istio-ingress get gateways.networking.istio.io   # lab-gateway, once Argo CD has synced the platform stack
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.56.10:30880/   # 404 from Envoy = gateway up, nothing routed
 kubectl -n argocd get applications             # bootstrap, platform, observability and their components -- Synced / Healthy
 kubectl -n platform get pods                   # the object store
